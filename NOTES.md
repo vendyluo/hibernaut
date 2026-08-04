@@ -106,7 +106,7 @@ hibernation bug。這是最危險的失敗模式 —— 本地全綠，上線後
 | 項目 | 結果 |
 | --- | --- |
 | `npm run typecheck` | 通過 |
-| `npm test` | 38/38 通過（core 18、workers 20） |
+| `npm test` | 39/39 通過（core 18、workers 21） |
 | Spike 1 — hibernation 存活 | **通過**。驅逐後狀態完整、排程列仍在 SQLite、守衛到期能把 agent 拉回 Idle、ManagedRuntime 重建後完整一輪對話走得完 |
 | Spike 2 — 跨 handler 的 fiber | **推翻了原本的假設**，見下 |
 | Spike 3 — bundle 體積 | 2892.66 KiB raw / **543.09 KiB gzip**（含完整 Agents SDK + Effect）。離免費方案 3 MiB 壓縮上限還很遠 |
@@ -188,6 +188,8 @@ byte 擋、`cmd` 裁切、schema 當不變式。模型輸出也一樣裁 —— 
 現在它們放在 `initializeOnce()`，由 `onStart()`、`dispatch()` 與公開的
 `reconcileNow()` 共同保證。初始化使用共享 Promise 做 single-flight：並行呼叫會等待
 同一輪完成，失敗不會被誤記成已完成；真正執行 repair 的私有路徑只接收已驗證狀態。
+初始化內部產生的 instruction 結果也必須留在這條私有路徑；若回頭走公開 `dispatch()`，
+會等待自己尚未完成的 initialization Promise 而死鎖。
 
 ## 順帶觀察
 

@@ -298,4 +298,50 @@ describe("初始化只完成一次，而且所有呼叫都等待同一輪", () =
       expect(cmdCalls).toBe(3);
     });
   });
+
+  /**
+   * 迴歸測試：`executeInstruction` 一度呼叫公開的 `dispatch()`，於是
+   * `initialize()` → `reconcileValidatedState()` → `executeInstruction()` →
+   * `dispatch()` → `initializeOnce()` 會去 await 自己所在的那個初始化 Promise。
+   *
+   * 現行的 chat agent 剛好碰不到（reconcile 只產生 Emit 或 ScheduleAction），
+   * 但 shell 是通用的，這個陷阱不該留著。
+   */
+  it("reconcile 產生的 action 帶 RunInstruction 時不會自我死鎖", async () => {
+    const stub = stubFor("reconcile-runinstruction-no-deadlock");
+
+    const outcome = await runInDurableObject(stub, async (instance: ChatAgent) => {
+      const target = instance as unknown as { def: typeof chatAgent };
+      target.def = {
+        ...chatAgent,
+        reconcile: () => ({ _tag: "ModelTimeout", requestId: "req-x" }),
+        cmd: (state, action) =>
+          action._tag === "ModelTimeout"
+            ? {
+                state,
+                directives: [
+                  {
+                    _tag: "RunInstruction",
+                    action: "callModel",
+                    params: { messages: [{ role: "user", text: "hi" }] },
+                    resultAction: "ModelResult",
+                    meta: { requestId: "req-x" }
+                  }
+                ]
+              }
+            : chatAgent.cmd(state, action)
+      };
+
+      return await Promise.race([
+        instance
+          .dispatch({ _tag: "UserMessage", text: "hi", now: Date.now() })
+          .then(() => "completed" as const),
+        new Promise<"deadlocked">((resolve) =>
+          setTimeout(() => resolve("deadlocked"), 1_500)
+        )
+      ]);
+    });
+
+    expect(outcome).toBe("completed");
+  });
 });

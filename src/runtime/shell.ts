@@ -284,7 +284,14 @@ export abstract class DirectiveAgent<
             )
           );
 
-    await this.dispatch({
+    // 必須是 `dispatchInitialized`，不能是公開的 `dispatch`。
+    //
+    // `reconcile` 產生的 action 可能帶 `RunInstruction`，那條路徑是
+    // `initialize()` → `reconcileValidatedState()` → ... → 這裡。此時
+    // `#initialized` 還是 false、`#initialization` 還是進行中的那個 Promise，
+    // 走公開入口就會 `await` 自己所在的 Promise —— 直接死鎖。
+    // 同理適用於 `armGuard` 的 fallback。
+    await this.dispatchInitialized({
       ...(instruction.meta ?? {}),
       _tag: instruction.resultAction,
       outcome
