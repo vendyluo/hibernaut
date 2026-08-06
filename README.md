@@ -1,66 +1,94 @@
-# cfa — Cloudflare Durable Agent 模式模板
+# hibernaut — a durable-agent pattern template for Cloudflare
 
-這不是通用 starter，是**模式模板**：一套在 Cloudflare Durable Objects 上寫
-「長壽命、有狀態、跨 hibernation 可恢復」agent 的不變式，附帶可跑的參考實作
-與測試骨架。核心思路借自 BEAM/OTP（經由 [Jido](https://github.com/agentjido/jido)
-的三層切法），落地在 Agents SDK + Effect 上。
+> hibernation + astronaut: a Durable Object gets evicted roughly every
+> 70–140 seconds. Everything in this repo is about navigating that
+> environment and staying alive.
 
-架構的完整論述、四條硬規則、每一條的實測依據，都在 **[NOTES.md](./NOTES.md)** ——
-那份文件是這個 repo 真正的資產，程式碼只是它的可執行版本。
+*[繁體中文](./README.zh-TW.md)*
 
-## 什麼案子該用 / 不該用
+This is not a general-purpose starter. It is a **pattern template**: a set
+of invariants for writing long-lived, stateful, hibernation-survivable
+agents on Cloudflare Durable Objects, shipped as a runnable reference
+implementation with its test harness. The core ideas are borrowed from
+BEAM/OTP (by way of [Jido](https://github.com/agentjido/jido)'s three-layer
+split), grounded on the Agents SDK + Effect.
 
-**適用**（甜蜜點很窄但很深）：
+The full argument — the four hard rules and the field evidence behind each —
+lives in **[NOTES.md](./NOTES.md)** (zh-TW). That document is the actual
+asset of this repo; the code is its executable form.
 
-- 長壽命、事件驅動的 agent：一趟旅程、一場對話、一個訂單的生命週期
-- 需要跨 hibernation / 部署恢復的多步驟流程（tool-calling 迴圈、逾時守衛、排程喚醒）
-- 決策邏輯需要零平台可測（純函式 `cmd`，不用 miniflare 就能測完）
+## When to use it / when not to
 
-**不適用**（別套，紀律是白付的成本）：
+**Use it for** (the sweet spot is narrow but deep):
 
-- 無狀態 Worker（純 API、代理、轉換）—— 用平台原生寫法
-- 標準聊天應用且 SDK 的 `AIChatAgent` + `useAgentChat` 夠用 —— 走 SDK 內建路線
-- 長時背景批次管線 —— 用 [Workflows](https://developers.cloudflare.com/workflows/)，不是這個
+- Long-lived, event-driven agents: the lifecycle of a trip, a conversation,
+  an order
+- Multi-step flows that must survive hibernation and deploys (tool-calling
+  loops, timeout guards, scheduled wake-ups)
+- Decision logic that must be testable with zero platform dependencies
+  (a pure `cmd` function — no miniflare needed to test it)
 
-## 三層切法
+**Do not use it for** (the discipline would be pure overhead):
+
+- Stateless Workers (plain APIs, proxies, transforms) — write them the
+  platform-native way
+- Standard chat apps where the SDK's `AIChatAgent` + `useAgentChat` are
+  enough — take the SDK's built-in path
+- Long-running background pipelines — use
+  [Workflows](https://developers.cloudflare.com/workflows/), not this
+
+## The three-layer split
 
 ```
-core/      純函式層。Action / AgentDef / Directive / turn —— 零平台、零 Effect runtime，
-           agent 的全部決策邏輯在這裡，snapshot test 就能測完。
-runtime/   shell。唯一碰 Agents SDK 的檔案（DirectiveAgent）：dispatch 順序、
-           排程守衛、狀態驗證與隔離、reconcile、runQuery、文字輸入邊界。
-example/   chat.ts 是活規格 —— 剛好展示完所有規則，一行不多。新 agent 從抄它開始。
+core/      Pure functions. Action / AgentDef / Directive / turn — zero
+           platform, zero Effect runtime. All agent decision logic lives
+           here and can be fully covered by snapshot tests.
+runtime/   The shell. The only file that touches the Agents SDK
+           (DirectiveAgent): dispatch ordering, schedule guards, state
+           validation and quarantine, reconcile, runQuery, the text-input
+           boundary.
+example/   chat.ts is the living spec — it demonstrates every rule and
+           not one line more. New agents start by copying it.
 ```
 
-規則的最短版（完整版與依據見 NOTES.md）：
+The rules, shortest form (full version and evidence in NOTES.md):
 
-1. `cmd` 是純函式 —— 時間與亂數是輸入，不是環境
-2. 持久性只有一個擁有者：Cloudflare（`setState` / `schedule`）；Effect 只管單次 handler 內部
-3. 先存狀態、再排守衛、最後才做有風險的呼叫；期限寫進狀態本身，醒來靠 `reconcile` 自我修復
-4. 所有回音都要能被安全忽略（requestId 關聯，過期就丟）
+1. `cmd` is a pure function — time and randomness are inputs, not ambient
+2. Durability has exactly one owner: Cloudflare (`setState` / `schedule`);
+   Effect only governs the inside of a single handler
+3. Persist state first, arm the guard second, make the risky call last;
+   the deadline lives in state itself, and `reconcile` self-repairs on wake
+4. Every echo must be safe to ignore (requestId correlation; stale ones
+   are dropped)
 
-## 用法
+## Usage
 
-這個 repo 是 GitHub template：`Use this template` 開新專案（或 `degit vendyluo/cfa`），
-然後：
+This repo is a GitHub template: hit `Use this template`
+(or `degit vendyluo/hibernaut`), then:
 
 ```bash
 npm install
-npm test          # core（零平台）+ workers（真 workerd，可手動觸發驅逐）
+npm test          # core (zero platform) + workers (real workerd, manual eviction)
 npm run typecheck
 npm run dev
 ```
 
-新 agent 的起手式：抄 `example/chat.ts` 改狀態機，在 `index.ts` 掛上
-`DirectiveAgent` 子類，`wrangler.jsonc` 加 DO binding 與 `new_sqlite_classes`
-migration。決策邏輯全部放 `cmd`，I/O 全部放 Action，shell 不准長業務。
+Starting a new agent: copy `example/chat.ts` and rewrite the state machine,
+subclass `DirectiveAgent` in `index.ts`, add the DO binding and a
+`new_sqlite_classes` migration in `wrangler.jsonc`. All decisions go in
+`cmd`, all I/O goes in Actions, and the shell never grows business logic.
 
-## 維護紀律
+## Maintenance discipline
 
-- **每個應用收尾時問一次「有什麼該回流 template」。** 這個 repo 靠應用經驗
-  迭代；template 模式的固有缺點（clone 漂移）用回流慣例對沖。等第三個消費者
-  出現且 core 穩定不動，再考慮抽成 package —— 不要提前。
-- **抗拒把它養肥。** 想加東西先問「這是不變式還是業務？」業務留在應用 repo。
-- **`agents` 是 pre-1.0，版本要鎖。** shell 是唯一碰 SDK 的檔案，SDK 升版只准
-  改它；reconcile 依賴的 SDK 行為（如 `schedule` 的 `idempotent` 語意）由
-  workers 測試釘住 —— SDK 偷改行為時是測試叫，不是線上叫。
+- **At the end of every app built on this, ask once: what should flow back
+  into the template?** This repo iterates on application experience; the
+  backflow habit is what offsets the template model's inherent flaw (clone
+  drift). Once a third consumer exists and core has stopped moving, consider
+  extracting a package — not before.
+- **Resist fattening it.** Before adding anything, ask: is this an invariant
+  or business logic? Business logic stays in the application repo.
+- **`agents` is pre-1.0 — pin it.** The shell is the only file that touches
+  the SDK; an SDK upgrade may only change that file. SDK behaviors that
+  `reconcile` depends on (like `schedule`'s `idempotent` semantics) are
+  pinned by the workers tests — when the SDK quietly changes behavior, a
+  test screams, not production.
