@@ -49,6 +49,25 @@ export interface AgentDef<S, A extends TaggedAction> {
   /** 純函式。同樣輸入永遠同樣輸出。 */
   readonly cmd: (state: S, action: A) => CmdResult<S, A>;
   /**
+   * 會進排程表的 action 子集的 schema。
+   *
+   * ## 為什麼需要這個
+   *
+   * 狀態醒來會過 `state` schema 驗證，但排程表（`cf_agents_schedules`）裡的
+   * action payload 一樣是從 SQLite 讀回來的 —— 跨 hibernation、甚至跨部署存活。
+   * 改版之後舊排程列帶著舊形狀的 payload 醒來，塞進 `cmd` 就是未定義行為。
+   * 同一個信任邊界，就要有同一道驗證。
+   *
+   * 只需涵蓋**實際會被 `ScheduleAction` 排進去**的 action tag（通常是逾時守衛）。
+   * 驗不過的排程回呼由 shell 丟棄並回報，不會進 `cmd`。
+   *
+   * 型別上刻意是 `any`（同 `ActionRegistry` 的理由）：這是 runtime 的信任邊界
+   * 驗證，不是編譯期型別；子集 schema 的靜態型別窄於 `A`，宣告成 `Schema<A>`
+   * 反而過不了 variance。
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly scheduledAction?: Schema.Schema<any, any>;
+  /**
    * 自我修復。純函式：看著狀態回答「要把自己修回一致，該做哪個 action？」
    * 不需要修就回 `null`。
    *

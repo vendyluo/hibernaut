@@ -18,7 +18,9 @@
 import { Agent } from "agents";
 import { Cause, Either, Exit, Layer, ManagedRuntime, Schema } from "effect";
 import {
+  ActionError,
   runAction,
+  type Action,
   type ActionRegistry,
   type AnyAction
 } from "../core/action.js";
@@ -253,9 +255,103 @@ export abstract class DirectiveAgent<
   // 排程回呼（必須是 public：`schedule()` 的 callback 型別是 `keyof this`）
   // -------------------------------------------------------------------------
 
-  /** @internal 由 `ScheduleAction` 觸發。 */
+  /**
+   * @internal 由 `ScheduleAction` 觸發。
+   *
+   * payload 是從 `cf_agents_schedules` 讀回來的 —— 跟持久狀態同一個信任邊界，
+   * 所以同樣要過 schema（`def.scheduledAction`）。改版部署後醒來的舊排程列
+   * 若形狀不合，在這裡丟棄並回報，不會以未定義形狀進入 `cmd`。
+   */
   async resumeAction(action: A): Promise<void> {
+    const schema = this.def.scheduledAction;
+    if (schema !== undefined) {
+      const decoded = Schema.decodeUnknownEither(schema)(action);
+      if (Either.isLeft(decoded)) {
+        this.onFail(
+          "scheduled action failed schema validation; dropped",
+          decoded.left.message
+        );
+        return;
+      }
+    }
     await this.dispatch(action);
+  }
+
+  // -------------------------------------------------------------------------
+  // 唯讀查詢路 —— 不進 cmd、不碰狀態，但仍受初始化與隔離保護
+  // -------------------------------------------------------------------------
+
+  /**
+   * 直接執行一個 Action 並回傳結果，不經過狀態機。
+   *
+   * 給「要資料、不要對話」的入口用：HTTP 卡片、健康檢查、預覽。這是**唯一**
+   * 被認可的繞過 `dispatch` 執行 Action 的方式 —— 它仍然等初始化完成、仍然
+   * 尊重隔離。直接摸 `this.runtime` 會繞過這兩層，不要那樣做。
+   *
+   * 不可從 `onWake()` 或初始化路徑呼叫（會等待自己所在的 Promise 而死鎖），
+   * 理由同 `dispatch`。
+   */
+  protected async runQuery<I, O>(
+    action: Action<I, O, R>,
+    params: unknown
+  ): Promise<Exit.Exit<O, ActionError>> {
+    await this.initializeOnce();
+    if (this.#quarantine !== null) {
+      return Exit.fail(
+        new ActionError({
+          action: action.name,
+          message: `agent quarantined: ${this.#quarantine}`
+        })
+      );
+    }
+    return await this.runtime.runPromiseExit(runAction(action, params));
+  }
+
+  // -------------------------------------------------------------------------
+  // 文字輸入邊界 —— 時鐘與容量上限只在這裡出現，`cmd` 拿不到
+  // -------------------------------------------------------------------------
+
+  /**
+   * 文字輸入的 UTF-8 byte 上限。`null` = 不設限。
+   *
+   * 在任何東西被持久化**之前**就擋掉超大輸入 —— DO 的狀態會一直存在，
+   * 沒有上限就等於把儲存與 LLM 成本的控制權交給 client。
+   */
+  protected maxInputBytes(): number | null {
+    return null;
+  }
+
+  /**
+   * 文字輸入 → action。回 `null` 表示忽略這則輸入。
+   *
+   * 對話型 agent 覆寫這個而不是 `onMessage`：byte 上限、rejected 回報、
+   * 時鐘注入（`now`）都由 shell 統一處理。
+   */
+  protected textAction(_text: string, _now: number): A | null {
+    return null;
+  }
+
+  override async onMessage(
+    _connection: unknown,
+    message: string | ArrayBuffer
+  ): Promise<void> {
+    if (typeof message !== "string") return;
+
+    const limit = this.maxInputBytes();
+    if (limit !== null) {
+      const bytes = new TextEncoder().encode(message).byteLength;
+      if (bytes > limit) {
+        this.onEmit("rejected", {
+          reason: "message too large",
+          bytes,
+          limit
+        });
+        return;
+      }
+    }
+
+    const action = this.textAction(message, Date.now());
+    if (action !== null) await this.dispatch(action);
   }
 
   // -------------------------------------------------------------------------

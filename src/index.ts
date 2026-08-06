@@ -46,35 +46,14 @@ export class ChatAgent extends DirectiveAgent<
     return ModelClientLive;
   }
 
-  /**
-   * WebSocket 訊息就是一個 action。shell 之外不需要任何額外編排。
-   *
-   * 兩件事只能在這個邊界做，因為 `cmd` 是純的：
-   *   - 讀時鐘（`Date.now()`）
-   *   - 擋掉超大輸入（在任何東西被持久化**之前**）
-   */
-  override async onMessage(
-    _connection: unknown,
-    message: string | ArrayBuffer
-  ): Promise<void> {
-    if (typeof message !== "string") return;
+  // WebSocket 文字就是一個 action。邊界的活（byte 上限、rejected 回報、時鐘）
+  // 由 shell 統一做 —— 對話型 agent 只覆寫這兩個。
+  protected override maxInputBytes(): number {
+    return MAX_MESSAGE_BYTES;
+  }
 
-    const bytes = new TextEncoder().encode(message).byteLength;
-    if (bytes > MAX_MESSAGE_BYTES) {
-      this.broadcast(
-        JSON.stringify({
-          type: "rejected",
-          payload: { reason: "message too large", bytes, limit: MAX_MESSAGE_BYTES }
-        })
-      );
-      return;
-    }
-
-    await this.dispatch({
-      _tag: "UserMessage",
-      text: message,
-      now: Date.now()
-    });
+  protected override textAction(text: string, now: number): ChatAction {
+    return { _tag: "UserMessage", text, now };
   }
 }
 

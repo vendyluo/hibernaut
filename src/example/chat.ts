@@ -36,6 +36,7 @@ import {
   scheduleAction,
   type Outcome
 } from "../core/directive.js";
+import { guardDeadline, nextRequest, reconcileTurn } from "../core/turn.js";
 
 // ---------------------------------------------------------------------------
 // 容量上限 —— schema、cmd、邊界三處共用同一組常數
@@ -140,15 +141,14 @@ const cmd = (
         };
       }
 
-      if (state.seq >= Number.MAX_SAFE_INTEGER) {
+      const request = nextRequest(state.seq);
+      if (request === null) {
         return {
           state,
           directives: [emit("error", { message: "request sequence exhausted" })]
         };
       }
-
-      const seq = state.seq + 1;
-      const requestId = `req-${seq}`;
+      const { seq, requestId } = request;
       const messages = append(state.messages, {
         role: "user",
         text: truncate(action.text)
@@ -161,7 +161,7 @@ const cmd = (
           phase: {
             _tag: "AwaitingModel",
             requestId,
-            deadlineAt: action.now + MODEL_TIMEOUT_SECONDS * 1_000
+            deadlineAt: guardDeadline(action.now, MODEL_TIMEOUT_SECONDS)
           },
           seq
         },
@@ -242,36 +242,32 @@ const extractText = (value: unknown): string | null => {
   return null;
 };
 
-/**
- * 自我修復。純函式，`now` 由 shell 傳入。
- *
- * 只看狀態，不看排程表 —— 因為排程表那一列正是可能沒寫成功的東西。
- */
-const reconcile = (state: ChatState, now: number): ChatAction | null => {
-  if (state.phase._tag !== "AwaitingModel") return null;
+/** 自我修復決策收斂在 core/turn.ts —— 這裡只描述兩個出口的 action 形狀。 */
+const reconcile = (state: ChatState, now: number): ChatAction | null =>
+  reconcileTurn<ChatAction>(
+    state.phase._tag === "AwaitingModel" ? state.phase : null,
+    now,
+    (requestId) => ({ _tag: "ModelTimeout", requestId }),
+    (requestId, remainingSeconds) => ({
+      _tag: "RearmGuard",
+      requestId,
+      remainingSeconds
+    })
+  );
 
-  // 期限已過：不管守衛在不在，直接就地逾時。
-  if (now >= state.phase.deadlineAt) {
-    return { _tag: "ModelTimeout", requestId: state.phase.requestId };
-  }
-
-  // 期限未到：把守衛補排回來。`idempotent` 讓重複補排不會長出多列。
-  return {
-    _tag: "RearmGuard",
-    requestId: state.phase.requestId,
-    remainingSeconds: Math.max(
-      1,
-      Math.ceil((state.phase.deadlineAt - now) / 1_000)
-    )
-  };
-};
+/** 會被 `ScheduleAction` 排進排程表的 action 子集 —— 醒來時由 shell 驗證。 */
+const ScheduledChatAction = Schema.Struct({
+  _tag: Schema.Literal("ModelTimeout"),
+  requestId: Schema.String
+});
 
 export const chatAgent = defineAgent<ChatState, ChatAction>({
   name: "chat",
   state: ChatState,
   initialState: initialChatState,
   cmd,
-  reconcile
+  reconcile,
+  scheduledAction: ScheduledChatAction
 });
 
 // ---------------------------------------------------------------------------
