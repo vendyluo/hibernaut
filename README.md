@@ -14,8 +14,8 @@ BEAM/OTP (by way of [Jido](https://github.com/agentjido/jido)'s three-layer
 split), grounded on the Agents SDK + Effect.
 
 The full argument — the four hard rules and the field evidence behind each —
-lives in **[NOTES.md](./NOTES.md)** (zh-TW). That document is the actual
-asset of this repo; the code is its executable form.
+lives in **[NOTES.md](./NOTES.md)**. That document is the actual asset of
+this repo; the code is its executable form.
 
 ## When to use it / when not to
 

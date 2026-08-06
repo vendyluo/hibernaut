@@ -1,208 +1,281 @@
-# Cloudflare Agents + Effect：從 BEAM / Jido 借鑑的架構
+# Cloudflare Agents + Effect: an architecture borrowed from BEAM / Jido
 
-這份骨架不是「用 Effect 包一層 Agents SDK」。它是把 Jido 的三層切法
-（Action / Agent / AgentServer）原樣搬到 Durable Object 上，因為那個切法
-恰好解掉 DO 最難的問題：**hibernation**。
+*[繁體中文](./NOTES.zh-TW.md)*
 
-## 對應表
+This skeleton is not "Effect wrapped around the Agents SDK". It is Jido's
+three-layer split (Action / Agent / AgentServer) transplanted onto Durable
+Objects as-is, because that split happens to solve the hardest problem DOs
+have: **hibernation**.
 
-| Jido（Elixir） | 這裡（TypeScript） | 檔案 |
+## Correspondence table
+
+| Jido (Elixir) | Here (TypeScript) | File |
 | --- | --- | --- |
-| `Jido.Action` | `Action` — Schema 進出、Effect 執行 | `src/core/action.ts` |
+| `Jido.Action` | `Action` — schema in/out, Effect execution | `src/core/action.ts` |
 | `Jido.Instruction` | `RunInstruction` directive | `src/core/directive.ts` |
-| `Jido.Agent` + `cmd/2` | `AgentDef` + 純 `cmd` | `src/core/agent.ts` |
+| `Jido.Agent` + `cmd/2` | `AgentDef` + pure `cmd` | `src/core/agent.ts` |
 | `Jido.Agent.Directive` | `Directive` | `src/core/directive.ts` |
 | `Jido.AgentServer` | `DirectiveAgent extends Agent` | `src/runtime/shell.ts` |
-| `Jido.Exec` 的 timeout / retry / backoff | `runAction` 的 `Effect.timeout` / `Effect.retry` | `src/core/action.ts` |
-| GenServer `init/1` | `onStart()`（每次醒來都跑） | `src/runtime/shell.ts` |
+| `Jido.Exec` timeout / retry / backoff | `runAction`'s `Effect.timeout` / `Effect.retry` | `src/core/action.ts` |
+| GenServer `init/1` | `onStart()` (runs on every wake) | `src/runtime/shell.ts` |
 | `%Directive.Schedule{}` | `ScheduleAction` → `this.schedule()` | `src/runtime/shell.ts` |
-| 監督樹、`Jido.Pod` topology | **不搬**。DO 沒有 supervisor | — |
+| Supervision trees, `Jido.Pod` topology | **Not ported.** DOs have no supervisor | — |
 
-## 四條硬規則
+## The four hard rules
 
-### 1. `cmd` 是純函式，簽章裡不准有 Effect
+### 1. `cmd` is a pure function — no Effect in its signature
 
-抄自 `jido/lib/jido/agent.ex` 的不變式：
+Copied from the invariants in `jido/lib/jido/agent.ex`:
 
 > - The returned `agent` is **always complete** — no "apply directives" step needed
 > - `directives` are **external effects only** — they never modify agent state
 > - `cmd/2` is a **pure function**
 
-推論：`cmd` 裡不准有 `Date.now()` / `crypto.randomUUID()`。時間與 id 由邊界取好
-傳進來，或用狀態裡的單調 `seq` 導出。
+Corollary: no `Date.now()` / `crypto.randomUUID()` inside `cmd`. Time and ids
+are captured at the boundary and passed in, or derived from the monotonic
+`seq` in state.
 
-**注意**：狀態變更**不是** directive。`cmd` 回傳的 state 已經是最終狀態。
-directive 純粹是出站效果。這比「回傳一串 patch 再套用」更嚴格，也更好測。
+**Note**: a state change is **not** a directive. The state `cmd` returns is
+already final. Directives are purely outbound effects. This is stricter than
+"return a list of patches and apply them" — and easier to test.
 
-### 2. 持久性只有一個擁有者：Cloudflare
+### 2. Durability has exactly one owner: Cloudflare
 
-> 跨越單次 handler 的東西 → Cloudflare（`setState` / `sql` / `schedule`）
-> 單次 handler 內部的東西 → Effect（timeout / retry / Layer / Schema）
+> Anything that crosses a single handler → Cloudflare (`setState` / `sql` / `schedule`)
+> Anything inside a single handler → Effect (timeout / retry / Layer / Schema)
 
-`Effect.retry`、`Effect.sleep`、`Effect.fork` 全部活在記憶體裡，DO 大約
-70–140 秒沒活動就被驅逐，它們一起消失。Effect 自己的 durable execution
-（Effect Cluster、`@effect/workflow`）**不要用** —— 兩套 durability 並存的結果
-是兩套都只做對一半。
+`Effect.retry`, `Effect.sleep`, `Effect.fork` all live in memory. A DO gets
+evicted after roughly 70–140 seconds of inactivity, and they vanish with it.
+Effect's own durable execution (Effect Cluster, `@effect/workflow`) —
+**do not use it**. Two coexisting durability systems end up each doing only
+half the job right.
 
-### 3. 順序：先存狀態，再排守衛，最後才做有風險的呼叫
+### 3. Ordering: persist state, arm the guard, then make the risky call
 
-`dispatch` 的順序：
+`dispatch` order:
 
-1. `cmd` 算出完整新狀態 → `setState`（同步寫入）
-2. `ScheduleAction`（把逾時守衛變持久）
+1. `cmd` computes the complete new state → `setState` (synchronous write)
+2. `ScheduleAction` (make the timeout guard durable)
 3. `Emit` / `Fail`
-4. `RunInstruction`（可能永遠不回來的那個）
+4. `RunInstruction` (the one that may never come back)
 5. `Stop`
 
-守衛必須在風險呼叫**開始之前**就寫進 SQLite。否則 DO 死在呼叫途中，agent
-就永遠卡在 `AwaitingModel`。
+The guard must be in SQLite **before** the risky call starts. Otherwise the
+DO dies mid-call and the agent is stuck in `AwaitingModel` forever.
 
-### 4. 所有回音都要能被安全忽略
+### 4. Every echo must be safe to ignore
 
-`this.schedule()` 是 at-least-once 的。同一個結果可能送達兩次，hibernation
-之後也可能收到上一輪的殘留。所以每個回音都帶 `requestId`，`cmd` 比對不上就
-直接丟掉 —— 等同 OTP 裡收到過期 monitor ref 的處理方式。
+`this.schedule()` is at-least-once. The same result can be delivered twice,
+and after hibernation you can receive leftovers from a previous round. So
+every echo carries a `requestId`, and `cmd` drops anything that doesn't
+match — the same way OTP handles a stale monitor ref.
 
-**不要試圖取消逾時守衛。** 讓它照常送達然後被忽略。在 at-least-once 的世界裡，
-把訊息設計成可安全忽略，比保證它不送達容易一個數量級。
+**Do not try to cancel the timeout guard.** Let it arrive and be ignored.
+In an at-least-once world, designing messages to be safely ignorable is an
+order of magnitude easier than guaranteeing non-delivery.
 
-## 可恢復性從哪來
+## Where recoverability comes from
 
-不是從「把每一步都排進佇列」來的 —— 那樣每步都要多付一次 alarm round-trip 的延遲。
+Not from "queueing every step" — that costs an extra alarm round-trip of
+latency per step.
 
-是從**狀態機的設計**來的：狀態裡有 `AwaitingModel(requestId, deadlineAt)`，逾時
-守衛在呼叫前就已持久化；若守衛沒寫成功，醒來也能從 deadline 自行補排或逾時。
-DO 死在半路仍能把 agent 拉回 `Idle`。這是 BEAM 那套
-「用狀態機而不是用重試把事情做對」直接搬過來。
+It comes from **the design of the state machine**: state carries
+`AwaitingModel(requestId, deadlineAt)`, and the timeout guard is persisted
+before the call. Even if the guard write failed, waking up can re-arm or
+time out from the deadline alone. A DO dying mid-flight still gets pulled
+back to `Idle`. This is BEAM's "get it right with a state machine, not with
+retries", ported directly.
 
-所以 `executeInstruction` 是同步等待，不是排隊。延遲跟可恢復性都拿到。
+That is why `executeInstruction` awaits synchronously instead of queueing.
+You get the latency *and* the recoverability.
 
-## 不要從 BEAM 搬過來的東西
+## Things NOT to port from BEAM
 
-- **監督樹。** DO 沒有 supervisor、沒有 restart strategy、沒有 backoff、
-  沒有 `max_restarts`。在應用層仿一個只會做出更爛的版本。錯誤恢復靠規則 1–4。
-- **調度公平性。** DO 單執行緒且序列化，一次慢呼叫卡住送到同一個 agent 的
-  所有請求，沒有 reduction 計數幫你切換。「反正 scheduler 會處理」在這裡是錯的。
-  所以範例在忙碌時**明確拒絕**而不是排隊。
-- **`:observer` / 熱更新。** 沒有。可觀測性要第一天就設計進去。
+- **Supervision trees.** DOs have no supervisor, no restart strategy, no
+  backoff, no `max_restarts`. Imitating one at the application layer only
+  produces a worse version. Error recovery comes from rules 1–4.
+- **Scheduling fairness.** A DO is single-threaded and serialized; one slow
+  call blocks every request to that agent, and there is no reduction
+  counting to preempt it. "The scheduler will handle it" is wrong here —
+  which is why the example **explicitly rejects** while busy instead of
+  queueing.
+- **`:observer` / hot code upgrades.** Don't exist. Design observability in
+  on day one.
 
-## 為什麼 `wrangler dev` 不夠
+## Why `wrangler dev` is not enough
 
-Cloudflare 文件寫得很直白：本地開發時 hibernatable WebSocket 的事件照常送達，但
+Cloudflare's docs are blunt: in local development, hibernatable WebSocket
+events are delivered normally, but
 
 > the Durable Object is never evicted from memory
 
-也就是說 **`wrangler dev` 跟 miniflare 永遠不會驅逐 DO**，你在本地看不到任何
-hibernation bug。這是最危險的失敗模式 —— 本地全綠，上線後每 70–140 秒被咬一次。
+Meaning **`wrangler dev` and miniflare never evict a DO** — you will not see
+a single hibernation bug locally. This is the most dangerous failure mode:
+all green locally, bitten every 70–140 seconds in production.
 
-所以平台相關的驗證一律走 `@cloudflare/vitest-pool-workers`（測試跑在真的 workerd
-裡），用 `evictDurableObject()` 手動觸發驅逐。它做的正好是真實驅逐做的事：
-記憶體沒了，SQLite 還在。
+So all platform-related verification goes through
+`@cloudflare/vitest-pool-workers` (tests run in real workerd), using
+`evictDurableObject()` to trigger eviction manually. It does exactly what a
+real eviction does: memory is gone, SQLite remains.
 
-專案分成兩個 vitest project：`core`（純核心，零平台）與 `workers`（真 workerd）。
+The project is split into two vitest projects: `core` (pure core, zero
+platform) and `workers` (real workerd).
 
-## 驗證狀態
+## Verification status
 
-| 項目 | 結果 |
+| Item | Result |
 | --- | --- |
-| `npm run typecheck` | 通過 |
-| `npm test` | 39/39 通過（core 18、workers 21） |
-| Spike 1 — hibernation 存活 | **通過**。驅逐後狀態完整、排程列仍在 SQLite、守衛到期能把 agent 拉回 Idle、ManagedRuntime 重建後完整一輪對話走得完 |
-| Spike 2 — 跨 handler 的 fiber | **推翻了原本的假設**，見下 |
-| Spike 3 — bundle 體積 | 2892.66 KiB raw / **543.09 KiB gzip**（含完整 Agents SDK + Effect）。離免費方案 3 MiB 壓縮上限還很遠 |
-| E2E — Worker 入口 | **通過**。`SELF.fetch()` 發真實 WebSocket upgrade → `onMessage` → 回覆；未知路徑 404 |
+| `npm run typecheck` | Pass |
+| `npm test` | 46/46 pass (core 25, workers 21) |
+| Spike 1 — hibernation survival | **Pass.** State intact after eviction, schedule rows still in SQLite, an expiring guard pulls the agent back to Idle, and a full conversation round completes after ManagedRuntime is rebuilt |
+| Spike 2 — cross-handler fibers | **Overturned the original assumption**, see below |
+| Spike 3 — bundle size | 2892.66 KiB raw / **543.09 KiB gzip** (full Agents SDK + Effect included). Far from the free plan's 3 MiB compressed limit |
+| E2E — Worker entry | **Pass.** `SELF.fetch()` performs a real WebSocket upgrade → `onMessage` → reply; unknown paths 404 |
 
-`test/chat.test.ts` 沒有 import `agents`、miniflare、wrangler、ManagedRuntime 或
-Layer。agent 的全部決策邏輯都能在零平台的情況下測完 —— 這是規則 1 換來的。
+`test/chat.test.ts` imports neither `agents`, miniflare, wrangler,
+ManagedRuntime nor Layer. The agent's entire decision logic is testable with
+zero platform — that is what rule 1 buys.
 
-## Spike 2 的更正
+## Correction to Spike 2
 
-原本的假設是：fork 出去的 fiber 稍後做 I/O 會噴
-`Cannot perform I/O on behalf of a different request`。
+The original assumption: a forked fiber doing I/O later would throw
+`Cannot perform I/O on behalf of a different request`.
 
-**實測不會。** DO 的 `ctx.storage` 綁在物件本身而不是某一次請求，跨 handler
-存取是合法的（那個錯誤真正管的是從別次 incoming request 抓來的物件）。
+**Measured: it does not.** A DO's `ctx.storage` is bound to the object
+itself, not to a particular request; cross-handler access is legal (that
+error actually polices objects captured from a *different incoming
+request*).
 
-但真正的危險沒有消失，只是換了名字：**fork 出去的工作沒有人等它，DO 可以在它
-跑到一半時就被回收，做到一半的事會無聲消失** —— 沒有例外、沒有紀錄、沒有告警。
-`test-workers/io-context.test.ts` 第二支測試把這件事釘住了。
+But the real danger didn't disappear — it changed names: **nobody awaits a
+forked fiber, the DO can be reclaimed while it is mid-flight, and
+half-finished work vanishes silently** — no exception, no log, no alert.
+The second test in `test-workers/io-context.test.ts` pins this down.
 
-結論不變，理由要換：不要用 `Effect.fork` 承載跨 handler 的工作。
-不是因為平台會擋，是因為**平台不會擋** —— 它只會安靜地不見。
+Same conclusion, different reason: don't carry cross-handler work on
+`Effect.fork`. Not because the platform stops you — because **it doesn't**.
+It just quietly disappears.
 
-## 審查後修正（第二輪）
+## Post-review fixes (round two)
 
-一次外部審查點出四個問題，全部成立，都已修掉。最有價值的是第二個 —— 它打中的是
-我原本宣稱已經解決的東西。
+An external review raised four issues. All valid, all fixed. The most
+valuable was the second — it hit something I had claimed was already solved.
 
-### 1. Worker 入口沒接上（CRIT）
+### 1. The Worker entry was never wired up (CRIT)
 
-`export default { fetch: () => new Response("ok") }` 是佔位，`ChatAgent` 對外根本
-不可達。已改用 `routeAgentRequest(request, env)`，並補上 `test-workers/route.test.ts`
-從 `SELF.fetch()` 發真實 WebSocket upgrade 的 E2E。
+`export default { fetch: () => new Response("ok") }` was a placeholder;
+`ChatAgent` was unreachable from the outside. Switched to
+`routeAgentRequest(request, env)` and added `test-workers/route.test.ts` —
+an E2E that performs a real WebSocket upgrade via `SELF.fetch()`.
 
-其他 Workers 測試都用 `env.ChatAgent.get(...)` 直接操作 DO，**會繞過整合入口** ——
-入口壞掉的時候它們照樣全綠。這條路徑需要它自己的測試。
+The other Workers tests all drive the DO directly via
+`env.ChatAgent.get(...)`, which **bypasses the integration entry** — they
+stay green even when the entry is broken. That path needs its own test.
 
-### 2. `setState` 成功但 `schedule` 失敗 → 永久卡在 `AwaitingModel`
+### 2. `setState` succeeds but `schedule` fails → stuck in `AwaitingModel` forever
 
-我在 `shell.ts` 原本寫著「先存狀態則最壞情況是效果沒送出，而那是可以被逾時守衛
-撿回來的，**因為守衛本身也在狀態裡**」。最後那句是錯的：守衛在
-`cf_agents_schedules`，由一次獨立、可獨立失敗的寫入產生。舊的 hibernation 測試只
-證明「已成功排入的守衛能跨驅逐存活」，完全沒碰到「守衛根本沒排進去」。
+I had written in `shell.ts` that "persisting state first means the worst
+case is an unsent effect, which the timeout guard can recover, **because the
+guard itself is in state**". That last clause was wrong: the guard lives in
+`cf_agents_schedules`, produced by a separate write that can fail
+independently. The old hibernation tests only proved "a successfully
+scheduled guard survives eviction" — they never touched "the guard was never
+scheduled at all".
 
-而且這個窗口**在平台層面關不起來**：DO 只提供同步的 `ctx.storage.transactionSync()`，
-跨不過 `await`，而 `schedule()` 是 async。所以 reconciliation 不是折衷方案，是唯一解。
+And this window **cannot be closed at the platform level**: DOs only offer
+the synchronous `ctx.storage.transactionSync()`, which cannot span an
+`await`, while `schedule()` is async. So reconciliation is not a compromise
+— it is the only solution.
 
-修法：
+The fix:
 
-- `AwaitingModel` 從 `{ requestId }` 變成 `{ requestId, deadlineAt }` ——
-  **期限進狀態**，修復時只看狀態，不問排程表。
-- `AgentDef.reconcile(state, now)`：純函式，回答「要修回一致該做哪個 action」。
-  `now` 由 shell 傳入，規則 1 照舊成立。
-- `schedule()` 一律帶 `idempotent: true`，補排不會長出重複列。
-- 排程失敗就地把該 action 跑掉，並終止這批剩餘 directives：這一輪提早失敗，
-  但不會死鎖，也不會在沒有守衛時繼續呼叫模型。
+- `AwaitingModel` goes from `{ requestId }` to `{ requestId, deadlineAt }` —
+  **the deadline lives in state**; repair reads state only, never the
+  schedule table.
+- `AgentDef.reconcile(state, now)`: a pure function answering "which action
+  repairs me back to consistency". `now` is injected by the shell; rule 1
+  still holds.
+- `schedule()` always passes `idempotent: true`, so re-arming never grows
+  duplicate rows.
+- If scheduling fails, run that action on the spot and terminate the rest of
+  the directive batch: the round fails early, but it neither deadlocks nor
+  keeps calling the model without a guard.
 
-### 3. `AgentDef.state` 宣稱會驗證但從沒被用過
+### 3. `AgentDef.state` claimed validation but was never used
 
-註解寫「在信任邊界驗證」，實作一行都沒有。已在 `initializeOnce()` 實際 decode。
+The comment said "validated at the trust boundary"; the implementation had
+not a single line. Now actually decoded in `initializeOnce()`.
 
-**壞狀態的預設策略是隔離**：原始資料原封不動留在 SQLite，agent 拒絕服務並回報。
-不默默重置（會無聲吃掉使用者資料），不照樣執行（`cmd` 可能 throw 或走進沒有匹配
-的分支）。這是可以改的產品決策，不是技術結論。
+**The default policy for bad state is quarantine**: raw data stays untouched
+in SQLite for human inspection; the agent refuses service and reports.
+No silent reset (which silently eats user data), no running anyway (`cmd`
+may throw or fall into an unmatched branch). This is a changeable product
+decision, not a technical conclusion.
 
-### 4. 輸入與歷史無界成長
+### 4. Unbounded growth of input and history
 
-`MAX_MESSAGE_CHARS`（4096）與 `MAX_HISTORY_MESSAGES`（40）三處共用：邊界依 UTF-8
-byte 擋、`cmd` 裁切、schema 當不變式。模型輸出也一樣裁 —— 否則超長回覆會讓下次
-醒來的狀態驗證失敗而被隔離。
+`MAX_MESSAGE_CHARS` (4096) and `MAX_HISTORY_MESSAGES` (40), shared across
+three places: the boundary rejects by UTF-8 bytes, `cmd` truncates, the
+schema enforces the invariant. Model output is truncated the same way —
+otherwise an overlong reply makes the next wake's state validation fail and
+quarantines the agent.
 
-### 修這些的過程中發現的另一件事
+### One more thing found while fixing these
 
-`onStart()` 是由 partyserver 的 `#ensureInitialized()` 觸發的，而那**只發生在 SDK 的
-真實入口**（`fetch` / `alarm` / `webSocketMessage`）。任何繞過那些入口直接呼叫方法的
-路徑（RPC、facet、`runInDurableObject`）都不會跑到它。
+`onStart()` is triggered by partyserver's `#ensureInitialized()`, which
+**only fires on the SDK's real entries** (`fetch` / `alarm` /
+`webSocketMessage`). Any path that bypasses those entries and calls methods
+directly (RPC, facets, `runInDurableObject`) never runs it.
 
-所以驗證與修復不能只掛在 `onStart()` 上 —— 不變式不該依賴呼叫方走了哪條路進來。
-現在它們放在 `initializeOnce()`，由 `onStart()`、`dispatch()` 與公開的
-`reconcileNow()` 共同保證。初始化使用共享 Promise 做 single-flight：並行呼叫會等待
-同一輪完成，失敗不會被誤記成已完成；真正執行 repair 的私有路徑只接收已驗證狀態。
-初始化內部產生的 instruction 結果也必須留在這條私有路徑；若回頭走公開 `dispatch()`，
-會等待自己尚未完成的 initialization Promise 而死鎖。
+So validation and repair cannot hang off `onStart()` alone — invariants must
+not depend on which door the caller came through. They now live in
+`initializeOnce()`, jointly guaranteed by `onStart()`, `dispatch()` and the
+public `reconcileNow()`. Initialization is single-flight via a shared
+Promise: concurrent callers await the same round, and a failure is never
+mistakenly recorded as completed. Instruction results produced *inside*
+initialization must also stay on that private path; going back through the
+public `dispatch()` would await the still-unfinished initialization Promise
+— an instant deadlock.
 
-## 順帶觀察
+## Backflow from the first real app (round three)
 
-DO 裡實際建出來的表包含 `cf_agents_fibers`、`cf_agents_workflows`、`cf_agents_runs`
-—— Agents SDK 自己就帶了一套 durable execution。加上 Effect 那邊的 Effect Cluster
-與 `@effect/workflow`，**同一個程序裡有兩套 durable execution 是真實存在的風險**，
-不是假想。規則 2 不是潔癖，是必要的。
+After building the first real application on this skeleton (a tool-calling
+shop-assistant agent), four friction points — places the app either worked
+around or copied verbatim — flowed back into the base:
 
-## 還沒做的
+- **`core/turn.ts`, the turn-guard toolkit**: the `reconcile` decision was
+  duplicated word-for-word across both agents — that is a base invariant,
+  not business logic. `nextRequest` / `guardDeadline` / `reconcileTurn`.
+- **`AgentDef.scheduledAction`**: schedule-table payloads cross the same
+  SQLite trust boundary as state; `resumeAction` now validates on wake and
+  drops malformed rows with a report instead of feeding them to `cmd`.
+- **`DirectiveAgent.runQuery`**: the sanctioned read-only path (awaits
+  initialization, respects quarantine). The first app reached into
+  `this.runtime` to run an action directly and bypassed quarantine — the
+  bug got promoted into an affordance.
+- **The text-input boundary**: byte limit, rejected reporting and clock
+  injection moved into the shell (`maxInputBytes` / `textAction`); apps no
+  longer copy the `onMessage` boilerplate.
 
-- **還沒真的部署過。** 以上全部在本地 workerd（miniflare）驗證。真實驅逐的
-  *時序*（70–140 秒）模擬不了，`runDurableObjectAlarm()` 也是立刻執行而非等待。
-  驗到的是「被驅逐之後接不接得上」，不是「幾秒後被驅逐」。
-- `ModelClientLive` 是 echo stub，還沒接 Workers AI / AI Gateway。
-- `agents` 是 `^0.20.1`，pre-1.0 且 README 明說不收外部 PR、`experimental/` 無穩定性
-  保證。務必鎖版本並準備定期跟遷移。
+Deliberately **not** backflowed: the tool-calling loop itself. The second
+consumer's state machine won't be a plain chat loop; extracting now would
+extract the wrong shape — wait for the third real copy.
+
+## Incidental observation
+
+The tables actually created inside the DO include `cf_agents_fibers`,
+`cf_agents_workflows`, `cf_agents_runs` — the Agents SDK ships its own
+durable execution. Add Effect's side (Effect Cluster, `@effect/workflow`)
+and **two durable-execution systems in one process is a real risk, not a
+hypothetical**. Rule 2 is not fastidiousness; it is necessary.
+
+## Not done yet
+
+- **Never actually deployed.** Everything above was verified in local
+  workerd (miniflare). The *timing* of real evictions (70–140s) cannot be
+  simulated, and `runDurableObjectAlarm()` fires immediately rather than
+  waiting. What was verified is "can it pick up after an eviction", not
+  "evicted after N seconds".
+- `ModelClientLive` is an echo stub; Workers AI / AI Gateway not wired yet.
+- `agents` is `^0.20.1` — pre-1.0, README explicitly not accepting external
+  PRs, `experimental/` has no stability guarantees. Pin the version and be
+  ready to track migrations.

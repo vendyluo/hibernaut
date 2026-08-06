@@ -10,8 +10,9 @@
 與測試骨架。核心思路借自 BEAM/OTP（經由 [Jido](https://github.com/agentjido/jido)
 的三層切法），落地在 Agents SDK + Effect 上。
 
-架構的完整論述、四條硬規則、每一條的實測依據，都在 **[NOTES.md](./NOTES.md)** ——
-那份文件是這個 repo 真正的資產，程式碼只是它的可執行版本。
+架構的完整論述、四條硬規則、每一條的實測依據，都在
+**[NOTES.zh-TW.md](./NOTES.zh-TW.md)** —— 那份文件是這個 repo 真正的資產，
+程式碼只是它的可執行版本。
 
 ## 什麼案子該用 / 不該用
 
