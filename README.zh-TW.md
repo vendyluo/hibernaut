@@ -1,72 +1,92 @@
-# hibernaut — Cloudflare Durable Agent 模式模板
+# hibernaut
 
-> hibernation + astronaut：Durable Object 大約每 70–140 秒就被驅逐一次，
-> 這個 repo 的全部內容，就是怎麼在那樣的環境裡航行還活著。
+一份範圍刻意收窄、能感知 hibernation 的 Cloudflare Durable Object agent GitHub 模板。它是可執行的 echo 範例與可複製的架構，不是 runtime，也不是 npm package。
+
+它處理一種具體失敗：記憶體中的 provider 呼叫消失，持久狀態卻還停在「等待」。Request ID、timeout 守衛與啟動時 reconciliation 恢復的是領域狀態，不是中斷的呼叫；若守衛尚未建立，仍需要另一個事件喚醒。
 
 *[English](./README.md)*
 
-這不是通用 starter，是**模式模板**：一套在 Cloudflare Durable Objects 上寫
-「長壽命、有狀態、跨 hibernation 可恢復」agent 的不變式，附帶可跑的參考實作
-與測試骨架。核心思路借自 BEAM/OTP（經由 [Jido](https://github.com/agentjido/jido)
-的三層切法），落地在 Agents SDK + Effect 上。
+## 內含內容
 
-架構的完整論述、四條硬規則、每一條的實測依據，都在
-**[NOTES.zh-TW.md](./NOTES.zh-TW.md)** —— 那份文件是這個 repo 真正的資產，
-程式碼只是它的可執行版本。
+- `src/example/chat.ts`：有容量上限、request 關聯、持久逾時守衛與醒來時 reconciliation 的聊天狀態機。
+- `src/index.ts`：Cloudflare 入口與只做 echo 的 `ModelClient` layer。
+- `src/core/`：純狀態轉移與 directive 描述。Action 會 import Effect；`cmd` 本身不依賴平台。
+- `src/runtime/`：負責持久化、排程、驗證、WebSocket 與 Action 執行的 Agents SDK shell。
+- core 與 workerd 測試，包含明確觸發 Durable Object eviction 的測試。
 
-## 什麼案子該用 / 不該用
+範例不需要 AI key，也不會建立雲端資源。它只回傳文字，讓 durability 行為保持清楚且可預期。
 
-**適用**（甜蜜點很窄但很深）：
+## 需求與安裝
 
-- 長壽命、事件驅動的 agent：一趟旅程、一場對話、一個訂單的生命週期
-- 需要跨 hibernation / 部署恢復的多步驟流程（tool-calling 迴圈、逾時守衛、排程喚醒）
-- 決策邏輯需要零平台可測（純函式 `cmd`，不用 miniflare 就能測完）
+建議使用 [Node.js 24 LTS](https://nodejs.org/)。模板會把 `agents` 鎖在測試所支援的確切 SDK 版本；升級前請重新檢查測試與當時最新的 Cloudflare 文件。
 
-**不適用**（別套，紀律是白付的成本）：
-
-- 無狀態 Worker（純 API、代理、轉換）—— 用平台原生寫法
-- 標準聊天應用且 SDK 的 `AIChatAgent` + `useAgentChat` 夠用 —— 走 SDK 內建路線
-- 長時背景批次管線 —— 用 [Workflows](https://developers.cloudflare.com/workflows/)，不是這個
-
-## 三層切法
-
-```
-core/      純函式層。Action / AgentDef / Directive / turn —— 零平台、零 Effect runtime，
-           agent 的全部決策邏輯在這裡，snapshot test 就能測完。
-runtime/   shell。唯一碰 Agents SDK 的檔案（DirectiveAgent）：dispatch 順序、
-           排程守衛、狀態驗證與隔離、reconcile、runQuery、文字輸入邊界。
-example/   chat.ts 是活規格 —— 剛好展示完所有規則，一行不多。新 agent 從抄它開始。
-```
-
-規則的最短版（完整版與依據見 NOTES.md）：
-
-1. `cmd` 是純函式 —— 時間與亂數是輸入，不是環境
-2. 持久性只有一個擁有者：Cloudflare（`setState` / `schedule`）；Effect 只管單次 handler 內部
-3. 先存狀態、再排守衛、最後才做有風險的呼叫；期限寫進狀態本身，醒來靠 `reconcile` 自我修復
-4. 所有回音都要能被安全忽略（requestId 關聯，過期就丟）
-
-## 用法
-
-這個 repo 是 GitHub template：`Use this template` 開新專案
-（或 `degit vendyluo/hibernaut`），然後：
+使用 GitHub 的 **Use this template → Create a new repository**，clone 新 repository 後，在根目錄執行下列命令。授權尚待確認，再散布前請先查看 release preflight。
 
 ```bash
-npm install
-npm test          # core（零平台）+ workers（真 workerd，可手動觸發驅逐）
+npm ci
 npm run typecheck
+npm test
+```
+
+也可以分別執行：
+
+```bash
+npm run test:core
+npm run test:workers
+```
+
+## 本機執行
+
+```bash
 npm run dev
 ```
 
-新 agent 的起手式：抄 `example/chat.ts` 改狀態機，在 `index.ts` 掛上
-`DirectiveAgent` 子類，`wrangler.jsonc` 加 DO binding 與 `new_sqlite_classes`
-migration。決策邏輯全部放 `cmd`，I/O 全部放 Action，shell 不准長業務。
+這會啟動 `wrangler dev --local --ip 127.0.0.1`。另開終端機執行：
 
-## 維護紀律
+```bash
+npm run smoke
+```
 
-- **每個應用收尾時問一次「有什麼該回流 template」。** 這個 repo 靠應用經驗
-  迭代；template 模式的固有缺點（clone 漂移）用回流慣例對沖。等第三個消費者
-  出現且 core 穩定不動，再考慮抽成 package —— 不要提前。
-- **抗拒把它養肥。** 想加東西先問「這是不變式還是業務？」業務留在應用 repo。
-- **`agents` 是 pre-1.0，版本要鎖。** shell 是唯一碰 SDK 的檔案，SDK 升版只准
-  改它；reconcile 依賴的 SDK 行為（如 `schedule` 的 `idempotent` 語意）由
-  workers 測試釘住 —— SDK 偷改行為時是測試叫，不是線上叫。
+smoke test 會連到唯一 room：
+
+```text
+ws://127.0.0.1:8787/agents/chat-agent/<unique-room>
+```
+
+它會驗證純文字 echo，也會確認 client 無法寫入 SDK agent state。`validateStateChange` 拒絕 client 來源的寫入，同時允許伺服器狀態轉移；這**不是身分驗證**。根路徑刻意回傳 `404`。
+
+若只想檢查部署 bundle、不實際部署：
+
+```bash
+npm run build
+```
+
+已記錄的驗證證據與 release preflight 請見 [RELEASE.md](./RELEASE.md)。不要從本 README 推論目前的測試數量或 bundle 限制。
+
+## 改成你的 agent
+
+1. 改寫 `src/example/chat.ts` 的 state、actions 與 `cmd` transition function。
+2. 把 `src/index.ts` 的 echo `ModelClient` 換成你的 provider binding。
+3. 決策留在 `cmd`、I/O 留在 Actions、平台轉譯留在 shell。
+4. 上 production 前補上身分驗證、租戶授權、rate limit、可觀測性與 provider idempotency。
+5. 重新命名或新增 agent class 時，加入相應的 Durable Object binding 與 migration。
+
+這個範例會讓同一 room 的所有連線看到共用歷史，且沒有身分驗證或租戶隔離。加入這些控制以前，請勿公開部署。
+
+## 範圍與限制
+
+| 需求 | 優先選擇 |
+| --- | --- |
+| 明確領域狀態、過期結果守衛、可獨立測試的決策 | 本模板 |
+| 一般有狀態聊天、排程或內建聊天 UI 整合 | 直接用 Agents SDK / AIChatAgent |
+| agent 內部需要 checkpoint 的中斷工作 | SDK `runFiber` / `stash`，恢復邏輯仍由你定義 |
+| 具持久步驟、重試、長時間等待的獨立多步驟任務 | Workflows |
+| 無狀態請求處理 | 一般 Worker |
+
+模板只示範一個有守衛的 request/response 回合，不提供通用 supervisor、tool loop、replay engine、outbox、schema migration 系統或 exactly-once effects。`runQuery` 只是模板內的唯讀慣例，無法強迫外部 provider 保持唯讀。
+
+較長的 durable process 應依需求使用專用平台能力，例如 [Agents durable execution](https://developers.cloudflare.com/agents/runtime/execution/durable-execution/) 或 [Cloudflare Workflows](https://developers.cloudflare.com/workflows/)。本實作的詳細契約與失敗語意見 [NOTES.zh-TW.md](./NOTES.zh-TW.md)。
+
+相依套件與 attribution 見 [THIRD_PARTY.md](./THIRD_PARTY.md)。`package.json` 目前保留 ISC metadata，但 repository 沒有 `LICENSE` 檔；不要把本 README 視為開放原始碼授權。
+
+維護範圍是範例、失敗契約、測試與一致的文件，不包含 provider adapter 或下游應用。模板複本不會自動更新；請人工檢視變更、保留自己的 schema migration，並在 SDK 升級前重跑兩套測試。不承諾穩定的套件 API 或支援 SLA。

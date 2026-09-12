@@ -28,10 +28,9 @@ export interface Action<I, O, R = never> {
   readonly output: Schema.Schema<O, any>;
   readonly run: (input: I) => Effect.Effect<O, ActionError, R>;
   /**
-   * 單次執行的上限。對應 jido_action `Jido.Exec` 的 `:timeout`（預設 30_000）。
-   *
-   * 這裡刻意設 25 秒而不是 30 秒：Workers 的請求有自己的時間預算，
-   * 留一點餘裕讓 timeout 錯誤能走完 `cmd` 並把狀態寫回去，而不是被平台硬砍。
+   * 整次 runAction（包含 retry / backoff）的應用層時間預算。
+   * 預設 25 秒是範例政策，不是 Workers wall-clock 限制或平台保證。
+   * 不涵蓋 shell 初始化或 ManagedRuntime 的 Layer 建立；它們需另設有界策略。
    */
   readonly timeoutMs?: number;
   readonly retry?: RetryPolicy;
@@ -56,8 +55,9 @@ const DEFAULT_TIMEOUT_MS = 25_000;
  *
  * 這裡的 `Effect.retry` / `Effect.timeout` 是**單次 handler 內**的策略。
  * 它們活在記憶體裡，DO 一被驅逐就沒了 —— 這是對的，因為它們本來就只該負責
- * 「這一次呼叫的瞬時失敗」。真正需要跨時間的重試請用 `ScheduleAction` directive，
- * 或 `this.schedule()` 的 `retry` 選項。
+ * 「這一次呼叫的瞬時失敗」。跨 activation 的工作重試應另外採用官方 durable
+ * execution / Workflows，或明確配置 SDK schedule 的 callback/retry 契約。
+ * 本模板的 `ScheduleAction` 僅供可安全提早終結回合的守衛，不是工作重試佇列。
  */
 export const runAction = <I, O, R>(
   action: Action<I, O, R>,

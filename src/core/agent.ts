@@ -1,11 +1,9 @@
 /**
  * AgentDef —— 對應 `Jido.Agent`（jido/lib/jido/agent.ex）。
  *
- * Jido moduledoc 的三條不變式，這裡一條不改地照搬：
- *
- *   > - The returned `agent` is **always complete** — no "apply directives" step needed
- *   > - `directives` are **external effects only** — they never modify agent state
- *   > - `cmd/2` is a **pure function** — given same inputs, always same outputs
+ * 以下是受 Jido 啟發的本地契約（不是逐字引用，來源見 THIRD_PARTY.md）：
+ * 回傳完整 state；directive 描述外部效果；本模板的 cmd 是純函式。
+ * Jido 的 Action 可以有副作用，不應把本地較嚴格的 cmd 契約當成 Jido 全部行為。
  *
  * 所以 `cmd` 的型別是同步的純函式，**簽章裡沒有 Effect**。這是刻意的：
  * Effect 只出現在 Action 的葉節點（core/action.ts）跟 shell（runtime/shell.ts）。
@@ -15,9 +13,9 @@
  *
  * DO 會 hibernate。每次醒來 `onStart()` 都會重跑一次（等同 OTP 的 `init/1`）。
  * 如果決策邏輯裡摻了 I/O、時鐘、亂數，你就無法回答「我現在被驅逐，醒來還能不能
- * 接續？」這個問題 —— 而在 DO 上這個問題每 70–140 秒就被問一次。
+ * 接續？」這個問題。休眠／驅逐沒有固定週期，詳見 NOTES.md。
  *
- * 純函式讓答案永遠是「可以」：狀態是完整的，重放同一個 action 得到同一個結果。
+ * 純函式讓狀態轉移可以重現；仍需要持久化、喚醒來源與領域恢復策略。
  *
  * ## 推論：時間與亂數是輸入，不是環境
  *
@@ -43,6 +41,8 @@ export interface AgentDef<S, A extends TaggedAction> {
   /**
    * 狀態 schema。在信任邊界驗證：DO 每次醒來從 SQLite 讀回時。
    * 由 `DirectiveAgent.onStart()` 實際執行 —— 驗證失敗會把 agent 隔離。
+   * 儲存的是 JSON-compatible 的 S，驗證 schema 的 Type 側，不執行 decode/encode。
+   * 轉換型 schema 不會自動遷移舊資料；migration 必須另行明確處理。
    */
   readonly state: Schema.Schema<S, any>;
   readonly initialState: S;
@@ -60,6 +60,7 @@ export interface AgentDef<S, A extends TaggedAction> {
    *
    * 只需涵蓋**實際會被 `ScheduleAction` 排進去**的 action tag（通常是逾時守衛）。
    * 驗不過的排程回呼由 shell 丟棄並回報，不會進 `cmd`。
+   * 與 state 相同，payload 必須已符合 Type 側；不在 callback 中轉換或正規化。
    *
    * 型別上刻意是 `any`（同 `ActionRegistry` 的理由）：這是 runtime 的信任邊界
    * 驗證，不是編譯期型別；子集 schema 的靜態型別窄於 `A`，宣告成 `Schema<A>`
@@ -75,10 +76,9 @@ export interface AgentDef<S, A extends TaggedAction> {
    *
    * `dispatch` 是「先寫狀態、再送效果」，但這兩步**不在同一個交易裡**：
    * 狀態走 `setState`，排程走 `this.schedule()`，是兩次獨立、可獨立失敗的寫入。
-   * DO 只提供同步的 `ctx.storage.transactionSync()`，跨不過 `await`，而
-   * `schedule()` 是 async —— 所以這個窗口**在平台層面關不起來**。
+   * 本實作沒有包住兩者的交易；這不是「平台只提供同步交易」的主張。
    *
-   * 既然關不起來，就只能讓它可偵測、可修復：把「我應該有一個守衛，期限是 T」
+   * 這裡選擇讓窗口可偵測、可修復：把「我應該有一個守衛，期限是 T」
    * 寫進**狀態本身**，而不是只依賴排程表裡那一列存不存在。這樣醒來時的修復
    * 只需要看狀態，不需要去問另一個可能根本沒寫成功的地方。
    *

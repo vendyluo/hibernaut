@@ -15,7 +15,7 @@
  * Effect 也有自己的 durable execution 路線（Effect Cluster、`@effect/workflow`）。
  * 不要用。這個專案裡持久性只有一個擁有者，就是 Cloudflare。
  */
-import { Agent } from "agents";
+import { Agent, type Connection } from "agents";
 import { Cause, Either, Exit, Layer, ManagedRuntime, Schema } from "effect";
 import {
   ActionError,
@@ -70,7 +70,7 @@ export abstract class DirectiveAgent<
    * 每次 Durable Object 醒來都會跑 —— 這就是 OTP 的 `init/1`。
    *
    * 判準跟寫 GenServer 時一模一樣：**如果我現在被 kill，這個函式能不能把我
-   * 完整重建回來？** 在 DO 上這件事每 70–140 秒就發生一次，只是沒人通知你。
+   * 完整重建回來？** 休眠、驅逐與重啟都可能丟失記憶體；時間不是固定週期。
    */
   override async onStart(): Promise<void> {
     await this.initializeOnce();
@@ -85,7 +85,8 @@ export abstract class DirectiveAgent<
    * **為什麼不只掛在 `onStart()` 上。** partyserver 的 `onStart()` 是由
    * `#ensureInitialized()` 觸發的，而那只發生在 SDK 的真實入口
    * （`fetch` / `alarm` / `webSocketMessage`）。任何繞過那些入口直接呼叫方法的
-   * 路徑 —— RPC、facet、測試工具 —— 都不會跑到它。
+   * 路徑 —— 自訂 native RPC、測試工具 —— 不應假定它已執行。
+   * SDK 的 WebSocket RPC 仍走 WebSocket 入口；新版 SDK 的 lifecycle API 另行核對。
    *
    * 不變式不能依賴「呼叫方走了哪條路進來」。所以驗證與修復放在這裡，
    * 由 `onStart()` 與所有公開入口共同保證，共享 Promise 讓並行呼叫等待同一輪。
@@ -111,14 +112,14 @@ export abstract class DirectiveAgent<
   }
 
   private async initialize(): Promise<void> {
-    const decoded = Schema.decodeUnknownEither(this.def.state)(this.state);
-    if (Either.isLeft(decoded)) {
+    const validated = Schema.validateEither(this.def.state)(this.state);
+    if (Either.isLeft(validated)) {
       // 刻意**不**重置狀態：原始資料原封不動留在 SQLite 供人工判讀。
       // 壞掉的狀態要怎麼處理是資料契約決策，不該由 runtime 默默決定。
-      this.#quarantine = decoded.left.message;
+      this.#quarantine = validated.left.message;
       this.onFail(
         "persisted state failed schema validation; agent quarantined",
-        decoded.left.message
+        validated.left.message
       );
       return;
     }
@@ -161,9 +162,10 @@ export abstract class DirectiveAgent<
    * 到底做了沒有。
    *
    * **但這兩步不在同一個交易裡。** 狀態走 `setState`、排程走 `this.schedule()`，
-   * 是兩次可獨立失敗的寫入；DO 只給同步的 `transactionSync()`，跨不過 `await`，
-   * 所以這個窗口在平台層面關不起來。修補的方式是 `reconcile`：把「我應該有一個
+   * 是兩次可獨立失敗的 API 呼叫；這份實作沒有跨兩者的交易。
+   * 修補的方式是 `reconcile`：把「我應該有一個
    * 守衛、期限是 T」寫進狀態本身，醒來時只看狀態就能把缺的排程補回來。
+   * 若排程尚未建立就中斷，仍需要另一個事件喚醒；狀態本身不會產生 alarm。
    */
   async dispatch(action: A): Promise<void> {
     await this.initializeOnce();
@@ -233,10 +235,11 @@ export abstract class DirectiveAgent<
 
   /**
    * `idempotent: true` 讓「補排同一個守衛」不會長出重複列 —— 這是 `reconcile`
-   * 可以無腦重排的前提。
+   * 能補回缺失列的前提。相同 callback / serialized payload 的現有 delayed
+   * 排程保留原時間，不會更新期限；這不是 exactly-once 執行。
    *
    * 排不進去就地補救：**直接把那個 action 跑掉**。代價是這一輪提早失敗，
-   * 但總比讓 agent 永遠卡在等待狀態好。死鎖是最糟的失敗模式，因為它不會叫。
+   * 所以 ScheduleAction 僅適合可提早執行、會終結回合的守衛，不是通用工作排程器。
    */
   private async armGuard(delaySeconds: number, action: A): Promise<boolean> {
     try {
@@ -265,11 +268,11 @@ export abstract class DirectiveAgent<
   async resumeAction(action: A): Promise<void> {
     const schema = this.def.scheduledAction;
     if (schema !== undefined) {
-      const decoded = Schema.decodeUnknownEither(schema)(action);
-      if (Either.isLeft(decoded)) {
+      const validated = Schema.validateEither(schema)(action);
+      if (Either.isLeft(validated)) {
         this.onFail(
           "scheduled action failed schema validation; dropped",
-          decoded.left.message
+          validated.left.message
         );
         return;
       }
@@ -310,6 +313,11 @@ export abstract class DirectiveAgent<
   // -------------------------------------------------------------------------
   // 文字輸入邊界 —— 時鐘與容量上限只在這裡出現，`cmd` 拿不到
   // -------------------------------------------------------------------------
+
+  /** SDK state-update frames bypass onMessage; domain state belongs to cmd. */
+  override validateStateChange(_nextState: S, source: Connection | "server"): void {
+    if (source !== "server") throw new Error("Agent state is server-owned");
+  }
 
   /**
    * 文字輸入的 UTF-8 byte 上限。`null` = 不設限。
@@ -361,10 +369,10 @@ export abstract class DirectiveAgent<
   /**
    * 這裡刻意是**同步等待**而不是丟進 `this.schedule()` 排隊。
    *
-   * 走排隊可以拿到「呼叫途中被驅逐也能續跑」，代價是多一次 alarm round-trip 的
-   * 延遲 —— 對話型 agent 感受得到。這裡選擇同步，因為可恢復性已經由狀態機保證：
+   * 排程或官方 durable execution 具有不同的重試／checkpoint 契約。
+   * 這裡選擇等待單次呼叫，只提供領域狀態的恢復：
    * 狀態裡有 `AwaitingModel(requestId, deadlineAt)`，DO 死在半路時，醒來的
-   * `reconcile` 會依 `deadlineAt` 把 agent 拉回一致。
+   * `reconcile` 會依 `deadlineAt` 把 agent 拉回一致，不會續跑原呼叫。
    *
    * **可恢復性來自狀態機的設計，不是來自把每一步都排進佇列。**
    */

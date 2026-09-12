@@ -5,7 +5,7 @@
  * 審查正確指出：入口壞掉的時候那些測試照樣全綠。這一支專門守住那條路徑 ——
  * 從 `SELF.fetch()` 發出真實的 WebSocket upgrade，一路到 `onMessage` 再回到 client。
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { MAX_MESSAGE_CHARS } from "../src/example/chat.js";
 
@@ -67,6 +67,35 @@ describe("Worker 入口路由", () => {
     expect(event.type).toBe("message");
     expect(event.payload).toEqual({ role: "assistant", text: "echo: hello" });
 
+    ws.close();
+  });
+
+  it("SDK state frames cannot overwrite server-owned state; text still works", async () => {
+    const { ws, next } = await connect("route-server-state");
+    ws.send(JSON.stringify({
+      type: "cf_agent_state",
+      state: { messages: [], phase: { _tag: "Idle" }, seq: 999 }
+    }));
+    const rejected = await nextEvent(next, ["cf_agent_state_error"]);
+    expect(rejected.type).toBe("cf_agent_state_error");
+    ws.send("after rejected write");
+    const reply = await nextEvent(next, ["message", "error"]);
+    expect(reply.payload.text).toBe("echo: after rejected write");
+    const stub = env.ChatAgent.getByName("route-server-state");
+    expect(await runInDurableObject(stub, (instance) => instance.state.seq)).toBe(1);
+    ws.close();
+  });
+
+  it("hibernatable WebSocket resumes with persisted history after forced eviction", async () => {
+    const { ws, next } = await connect("route-eviction");
+    ws.send("before");
+    expect((await nextEvent(next, ["message"])).payload.text).toBe("echo: before");
+    const stub = env.ChatAgent.getByName("route-eviction");
+    await evictDurableObject(stub);
+    ws.send("after");
+    expect((await nextEvent(next, ["message"])).payload.text).toBe("echo: after");
+    expect(await runInDurableObject(stub, (instance) => instance.state.messages.map((m) => m.text)))
+      .toEqual(["before", "echo: before", "after", "echo: after"]);
     ws.close();
   });
 

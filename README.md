@@ -1,94 +1,92 @@
-# hibernaut — a durable-agent pattern template for Cloudflare
+# hibernaut
 
-> hibernation + astronaut: a Durable Object gets evicted roughly every
-> 70–140 seconds. Everything in this repo is about navigating that
-> environment and staying alive.
+A narrow GitHub template for a hibernation-aware agent on Cloudflare Durable Objects. It is a runnable echo example and an architecture to copy—not a runtime or npm package.
 
-*[繁體中文](./README.zh-TW.md)*
+It addresses a specific failure: persisted state still says “waiting” after the in-memory provider call disappears. Request IDs, timeout guards and activation-time reconciliation recover the domain state—not the interrupted call. A missing guard still needs another event to wake the object.
 
-This is not a general-purpose starter. It is a **pattern template**: a set
-of invariants for writing long-lived, stateful, hibernation-survivable
-agents on Cloudflare Durable Objects, shipped as a runnable reference
-implementation with its test harness. The core ideas are borrowed from
-BEAM/OTP (by way of [Jido](https://github.com/agentjido/jido)'s three-layer
-split), grounded on the Agents SDK + Effect.
+*[台灣繁體中文](./README.zh-TW.md)*
 
-The full argument — the four hard rules and the field evidence behind each —
-lives in **[NOTES.md](./NOTES.md)**. That document is the actual asset of
-this repo; the code is its executable form.
+## What is included
 
-## When to use it / when not to
+- `src/example/chat.ts`: a bounded chat state machine with request correlation, a durable timeout guard, and wake-time reconciliation.
+- `src/index.ts`: the Cloudflare entry point and an echo-only `ModelClient` layer.
+- `src/core/`: pure state transitions and directive descriptions. Actions import Effect; `cmd` itself is platform-free.
+- `src/runtime/`: the Agents SDK shell for persistence, scheduling, validation, WebSockets, and action execution.
+- Core tests and workerd tests, including explicit Durable Object eviction.
 
-**Use it for** (the sweet spot is narrow but deep):
+The example needs no AI key and creates no cloud resources. It echoes text so the durability behavior stays visible and deterministic.
 
-- Long-lived, event-driven agents: the lifecycle of a trip, a conversation,
-  an order
-- Multi-step flows that must survive hibernation and deploys (tool-calling
-  loops, timeout guards, scheduled wake-ups)
-- Decision logic that must be testable with zero platform dependencies
-  (a pure `cmd` function — no miniflare needed to test it)
+## Requirements and setup
 
-**Do not use it for** (the discipline would be pure overhead):
+[Node.js 24 LTS](https://nodejs.org/) is recommended. The template pins `agents` to the exact SDK version whose behavior is covered by its tests; review the tests and current Cloudflare documentation before upgrading it.
 
-- Stateless Workers (plain APIs, proxies, transforms) — write them the
-  platform-native way
-- Standard chat apps where the SDK's `AIChatAgent` + `useAgentChat` are
-  enough — take the SDK's built-in path
-- Long-running background pipelines — use
-  [Workflows](https://developers.cloudflare.com/workflows/), not this
-
-## The three-layer split
-
-```
-core/      Pure functions. Action / AgentDef / Directive / turn — zero
-           platform, zero Effect runtime. All agent decision logic lives
-           here and can be fully covered by snapshot tests.
-runtime/   The shell. The only file that touches the Agents SDK
-           (DirectiveAgent): dispatch ordering, schedule guards, state
-           validation and quarantine, reconcile, runQuery, the text-input
-           boundary.
-example/   chat.ts is the living spec — it demonstrates every rule and
-           not one line more. New agents start by copying it.
-```
-
-The rules, shortest form (full version and evidence in NOTES.md):
-
-1. `cmd` is a pure function — time and randomness are inputs, not ambient
-2. Durability has exactly one owner: Cloudflare (`setState` / `schedule`);
-   Effect only governs the inside of a single handler
-3. Persist state first, arm the guard second, make the risky call last;
-   the deadline lives in state itself, and `reconcile` self-repairs on wake
-4. Every echo must be safe to ignore (requestId correlation; stale ones
-   are dropped)
-
-## Usage
-
-This repo is a GitHub template: hit `Use this template`
-(or `degit vendyluo/hibernaut`), then:
+Use GitHub's **Use this template → Create a new repository**, then clone your new repository and run the commands from its root. The license decision is still pending; see the release preflight before redistribution.
 
 ```bash
-npm install
-npm test          # core (zero platform) + workers (real workerd, manual eviction)
+npm ci
 npm run typecheck
+npm test
+```
+
+Focused suites are also available:
+
+```bash
+npm run test:core
+npm run test:workers
+```
+
+## Run locally
+
+```bash
 npm run dev
 ```
 
-Starting a new agent: copy `example/chat.ts` and rewrite the state machine,
-subclass `DirectiveAgent` in `index.ts`, add the DO binding and a
-`new_sqlite_classes` migration in `wrangler.jsonc`. All decisions go in
-`cmd`, all I/O goes in Actions, and the shell never grows business logic.
+This starts `wrangler dev --local --ip 127.0.0.1`. In another terminal:
 
-## Maintenance discipline
+```bash
+npm run smoke
+```
 
-- **At the end of every app built on this, ask once: what should flow back
-  into the template?** This repo iterates on application experience; the
-  backflow habit is what offsets the template model's inherent flaw (clone
-  drift). Once a third consumer exists and core has stopped moving, consider
-  extracting a package — not before.
-- **Resist fattening it.** Before adding anything, ask: is this an invariant
-  or business logic? Business logic stays in the application repo.
-- **`agents` is pre-1.0 — pin it.** The shell is the only file that touches
-  the SDK; an SDK upgrade may only change that file. SDK behaviors that
-  `reconcile` depends on (like `schedule`'s `idempotent` semantics) are
-  pinned by the workers tests — when the SDK quietly changes behavior, a
-  test screams, not production.
+The smoke test opens a unique room at:
+
+```text
+ws://127.0.0.1:8787/agents/chat-agent/<unique-room>
+```
+
+It verifies the plain-text echo and verifies that client writes to SDK agent state are rejected. `validateStateChange` rejects client-originated writes while allowing server transitions; it is **not authentication**. The root path intentionally returns `404`.
+
+To check the deployment bundle without deploying:
+
+```bash
+npm run build
+```
+
+See [RELEASE.md](./RELEASE.md) for recorded verification evidence and the release preflight. Do not infer current test counts or bundle limits from this README.
+
+## Adapt the template
+
+1. Replace the state, actions, and `cmd` transition function in `src/example/chat.ts`.
+2. Replace the echo `ModelClient` in `src/index.ts` with your provider binding.
+3. Keep decisions in `cmd`, I/O in Actions, and platform translation in the shell.
+4. Add authentication, tenant authorization, rate limits, observability, and provider idempotency before production use.
+5. Add a Durable Object binding and migration when renaming or adding an agent class.
+
+This example shares a room's history with every connection to that room. It has no authentication or tenant isolation. Do not deploy it publicly before adding those controls.
+
+## Scope and limits
+
+| Need | Start with |
+| --- | --- |
+| Explicit domain states, stale-result guards, independently testable decisions | This template |
+| Ordinary stateful chat, scheduling, or built-in chat UI integration | Agents SDK / AIChatAgent directly |
+| Agent-local interrupted work with explicit checkpoints | SDK `runFiber` / `stash`; recovery logic is still yours |
+| Independent multi-step jobs with durable steps, retries and long waits | Workflows |
+| Stateless request handling | A plain Worker |
+
+This template demonstrates one guarded request/response turn. It does not provide a general supervisor, tool loop, replay engine, outbox, schema-migration system, or exactly-once effects. `runQuery` is a read-only convention inside the template; it cannot force an external provider to be read-only.
+
+For longer durable processes, use the platform facilities designed for them: [Agents durable execution](https://developers.cloudflare.com/agents/runtime/execution/durable-execution/) or [Cloudflare Workflows](https://developers.cloudflare.com/workflows/), according to your requirements. The detailed contract and failure semantics of this implementation are in [NOTES.md](./NOTES.md).
+
+Dependency and attribution information is in [THIRD_PARTY.md](./THIRD_PARTY.md). `package.json` currently carries ISC metadata, but this repository has no `LICENSE` file; do not treat this README as an open-source license grant.
+
+Maintenance covers the example, failure contracts, tests, and matching documentation—not provider adapters or downstream applications. Template copies do not auto-update. Review changes manually, retain your schema migrations, and rerun both suites before upgrading the SDK. No stable package API or support SLA is promised.

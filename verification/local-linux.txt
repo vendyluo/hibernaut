@@ -1,0 +1,185 @@
+v24.21.0
+11.19.0
+5f1ebf78dcdca552e379e21f63d1c7a3937a7da83a166efee528c62a475c1d91  package-lock.json
+
+added 259 packages, and audited 260 packages in 5s
+
+75 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+npm warn install-scripts 4 packages have install scripts not yet covered by allowScripts:
+npm warn install-scripts   core-js-pure@3.49.0 (postinstall: node -e "try{require('./postinstall')}catch(e){}")
+npm warn install-scripts   esbuild@0.28.1 (postinstall: node install.js)
+npm warn install-scripts   workerd@1.20260815.1 (postinstall: node install.js)
+npm warn install-scripts   workerd@1.20260911.1 (postinstall: node install.js)
+npm warn install-scripts
+npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.
+npm notice
+npm notice New major version of npm available! 11.19.0 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice
+
+> hibernaut@1.0.0 types
+> wrangler types --include-runtime=false
+
+
+ ⛅️ wrangler 4.131.1
+────────────────────
+Generating project types...
+
+interface __BaseEnv_Env {
+	ChatAgent: DurableObjectNamespace<import("./src/index").ChatAgent>;
+}
+declare namespace Cloudflare {
+	interface GlobalProps {
+		mainModule: typeof import("./src/index");
+		durableNamespaces: "ChatAgent";
+	}
+	interface Env extends __BaseEnv_Env {}
+}
+interface Env extends __BaseEnv_Env {}
+
+
+✨ Types written to worker-configuration.d.ts
+
+📣 Remember to rerun 'wrangler types' after you change your wrangler.jsonc file.
+
+
+> hibernaut@1.0.0 typecheck
+> tsc --noEmit
+
+
+> hibernaut@1.0.0 test:core
+> vitest run --project core
+
+
+ RUN  v4.1.11 /app
+
+ ✓  core  test/turn.test.ts (7 tests) 3ms
+ ✓  core  test/chat.test.ts (20 tests) 5ms
+
+ Test Files  2 passed (2)
+      Tests  27 passed (27)
+   Start at  07:47:39
+   Duration  348ms (transform 78ms, setup 0ms, import 283ms, tests 8ms, environment 0ms)
+
+
+> hibernaut@1.0.0 test:workers
+> vitest run --project workers
+
+
+ RUN  v4.1.11 /app
+
+Sourcemap for "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js" points to missing source files
+Sourcemap for "/app/node_modules/cron-schedule/dist/index.js" points to missing source files
+Sourcemap for "/app/node_modules/cron-schedule/dist/cron.js" points to missing source files
+Sourcemap for "/app/node_modules/cron-schedule/dist/utils.js" points to missing source files
+Sourcemap for "/app/node_modules/cron-schedule/dist/cron-parser.js" points to missing source files
+stderr | test-workers/route.test.ts > Worker 入口路由 > SDK state frames cannot overwrite server-owned state; text still works
+[Agent] State update rejected: Error: Agent state is server-owned
+    at ChatAgent.validateStateChange (/app/src/runtime/shell.ts:319:36)
+    at ChatAgent._setStateInternal (/app/node_modules/agents/src/index.ts:2939:10)
+    at /app/node_modules/agents/src/index.ts:2483:20
+    at /app/node_modules/agents/src/observability/tracing/tracer.ts:151:16
+    at withInvocationScope (/app/node_modules/agents/src/observability/tracing/tracer.ts:148:26)
+    at /app/node_modules/agents/src/index.ts:256:40
+    at runInInvocation (/app/node_modules/agents/src/index.ts:256:23)
+    at ChatAgent.Agent.onMessage (/app/node_modules/agents/src/index.ts:2455:14)
+
+stderr | test-workers/quarantine.test.ts > 持久狀態驗證 > runQuery initializes, rejects quarantined state, and never executes its action
+[chat] persisted state failed schema validation; agent quarantined { readonly messages: maxItems(40); readonly phase: { readonly _tag: "Idle" } | { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }; readonly seq: int & between(0, 9007199254740991) }
+└─ ["phase"]
+   └─ { readonly _tag: "Idle" } | { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }
+      └─ { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }
+         └─ ["deadlineAt"]
+            └─ is missing
+
+stderr | test-workers/quarantine.test.ts > 持久狀態驗證 > 狀態不符 schema 時，agent 醒來就隔離並拒絕服務
+[chat] persisted state failed schema validation; agent quarantined { readonly messages: maxItems(40); readonly phase: { readonly _tag: "Idle" } | { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }; readonly seq: int & between(0, 9007199254740991) }
+└─ ["phase"]
+   └─ { readonly _tag: "Idle" } | { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }
+      └─ { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }
+         └─ ["deadlineAt"]
+            └─ is missing
+
+ ✓  workers  test-workers/route.test.ts (5 tests) 205ms
+stderr | test-workers/quarantine.test.ts > 持久狀態驗證 > 直接呼叫 reconcileNow 也不能繞過驗證與隔離
+[chat] persisted state failed schema validation; agent quarantined { readonly messages: maxItems(40); readonly phase: { readonly _tag: "Idle" } | { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }; readonly seq: int & between(0, 9007199254740991) }
+└─ ["phase"]
+   └─ { readonly _tag: "Idle" } | { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }
+      └─ { readonly _tag: "AwaitingModel"; readonly requestId: string; readonly deadlineAt: number }
+         └─ ["deadlineAt"]
+            └─ is missing
+
+stderr | test-workers/hibernation.test.ts > 守衛沒排成功時的自我修復 > 當下排程失敗會終結這批 directives，不會繼續呼叫模型
+[chat] failed to arm scheduled action Error: simulated schedule failure
+    at ChatAgent.target.schedule (/app/test-workers/hibernation.test.ts:174:15)
+    at ChatAgent.armGuard (/app/src/runtime/shell.ts:246:18)
+    at ChatAgent.armGuard (/app/node_modules/agents/src/index.ts:1569:21)
+    at ChatAgent.applyDirective (/app/src/runtime/shell.ts:216:27)
+    at ChatAgent.applyDirective (/app/node_modules/agents/src/index.ts:1569:21)
+    at ChatAgent.applyDirectives (/app/src/runtime/shell.ts:208:24)
+    at ChatAgent.applyDirectives (/app/node_modules/agents/src/index.ts:1569:21)
+    at ChatAgent.dispatchInitialized (/app/src/runtime/shell.ts:184:16)
+    at ChatAgent.dispatchInitialized (/app/node_modules/agents/src/index.ts:1569:21)
+    at ChatAgent.dispatch (/app/src/runtime/shell.ts:178:16)
+
+ ✓  workers  test-workers/quarantine.test.ts (10 tests) 283ms
+stderr | test-workers/hibernation.test.ts > 守衛沒排成功時的自我修復 > 期限已過且沒有守衛：醒來就地逾時，不會永久卡住
+onRequest hasn't been implemented on ChatAgent:reconcile-expired responding to https://example.com/_wake
+
+stderr | test-workers/hibernation.test.ts > 守衛沒排成功時的自我修復 > 期限未到且沒有守衛：醒來把守衛補排回來
+onRequest hasn't been implemented on ChatAgent:reconcile-rearm responding to https://example.com/_wake
+
+ ✓  workers  test-workers/hibernation.test.ts (14 tests) 429ms
+ ✓  workers  test-workers/io-context.test.ts (2 tests) 1444ms
+     ✓ 強制驅逐後，未被等待的 fiber 不會完成延遲寫入  1360ms
+
+ Test Files  4 passed (4)
+      Tests  31 passed (31)
+   Start at  07:47:41
+   Duration  8.54s (transform 9.83s, setup 0ms, import 24.11s, tests 2.36s, environment 2ms)
+
+
+> hibernaut@1.0.0 build
+> wrangler deploy --dry-run
+
+
+ ⛅️ wrangler 4.131.1
+────────────────────
+Total Upload: 2897.65 KiB / gzip: 544.72 KiB
+Your Worker has access to the following bindings:
+Binding                        Resource
+env.ChatAgent (ChatAgent)      Durable Object
+
+--dry-run: exiting now.
+found 0 vulnerabilities
+found 0 vulnerabilities
+PASS: patched sharp native encode/decode smoke
+
+ ⛅️ wrangler 4.131.1
+────────────────────
+Your Worker has access to the following bindings:
+Binding                        Resource            Mode
+env.ChatAgent (ChatAgent)      Durable Object      local
+
+⎔ Starting local server...
+[wrangler:info] Ready on http://127.0.0.1:8787
+[wrangler:info] GET /nope 404 Not Found (415ms)
+[wrangler:info] GET /agents/chat-agent/smoke-5fd9eedc-39f9-4165-9934-6ca1ba74310b 101 Switching Protocols (28ms)
+PASS: local WebSocket echo, server state, rejected client overwrite, clean close
+✘ [ERROR] [Agent] State update rejected: Error: Agent state is server-owned
+
+      at Wrapper.validateStateChange (file:///app/src/runtime/shell.ts:319:36)
+      at Wrapper._setStateInternal (file:///app/node_modules/agents/src/index.ts:2939:10)
+      at null.<anonymous> (file:///app/node_modules/agents/src/index.ts:2483:20)
+      at null.<anonymous> (file:///app/node_modules/agents/src/observability/tracing/tracer.ts:151:16)
+      at withInvocationScope (file:///app/node_modules/agents/src/observability/tracing/tracer.ts:148:26)
+      at null.<anonymous> (file:///app/node_modules/agents/src/index.ts:256:40)
+      at runInInvocation (file:///app/node_modules/agents/src/index.ts:256:23)
+      at Agent2.onMessage (file:///app/node_modules/agents/src/index.ts:2455:14)
+
+
+🪵  Logs were written to "/root/.config/.wrangler/logs/wrangler-2026-09-12_07-47-52_131.log"

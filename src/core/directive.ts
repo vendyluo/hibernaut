@@ -19,8 +19,8 @@
  * ## Cloudflare 特有的額外約束：directive 必須可序列化
  *
  * 在 BEAM 上 directive 可以塞 pid、closure、任意 term，因為它馬上就被同一個
- * process 執行掉。在 Durable Object 上不行 —— directive 會被寫進
- * `cf_agents_schedules` 這張 SQLite 表、跨越 hibernation 之後才執行。
+ * process 執行掉。本模板選擇純資料契約；其中 ScheduleAction.action 會被寫進
+ * SDK 排程表跨越 activation，RunInstruction 本身不會被持久化或重放。
  *
  * 所以：**directive 裡不准有 function、Promise、Effect、或任何帶身分的物件。**
  * 只能是純資料。這就是為什麼 `RunInstruction.resultAction` 是一個字串 tag 而不是
@@ -37,10 +37,10 @@ export interface Emit {
 /**
  * 延遲後把一個 action 重新送回 `cmd`。對應 `%Directive.Schedule{}`。
  *
- * 這是「跨越單次 handler 的等待」唯一被允許的做法。不要用 `Effect.sleep`、
- * 不要用 `setTimeout`、不要用 `Effect.retry` 去等超過這次 handler 的東西 ——
- * DO 大約 70–140 秒沒活動就被驅逐，那些全部會消失。
- * `this.schedule()` 是寫進 SQLite 用 alarm 喚醒的，才是真的持久。
+ * 本模板用它建立持久逾時守衛，排程失敗時會提早執行 action 並中止本批效果。
+ * action 必須能安全提早終結回合，不能拿來排一般工作或遞迴補排自己。
+ * 記憶體內的 sleep/retry 不會跨實例重建；官方 durable execution / Workflows
+ * 是不同的持久執行選項，見 NOTES.md。
  */
 export interface ScheduleAction<A> {
   readonly _tag: "ScheduleAction";
@@ -54,8 +54,8 @@ export interface ScheduleAction<A> {
  *
  * 這是整份設計最重要的一個東西。它讓每一次外部呼叫（LLM、HTTP、DB）都變成
  * 一個**狀態轉移邊界**：呼叫前的狀態已經持久化，呼叫後的結果以新 action 進來
- * 再產生下一個持久化狀態。中間被 hibernate 掉也無所謂 —— 醒來時狀態是完整的，
- * 不會停在某個「函式執行到一半」的位置，因為根本沒有這種位置。
+ * 再產生下一個持久化狀態。中斷後只恢復領域狀態，不能恢復原本執行位置；
+ * 外部呼叫可能已成功而結果遺失，必須由應用定義冪等與補償策略。
  */
 export interface RunInstruction {
   readonly _tag: "RunInstruction";

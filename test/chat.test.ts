@@ -105,6 +105,29 @@ describe("chat agent cmd — 純決策", () => {
     expect(directives).toEqual([]);
   });
 
+  it("timed-out result and timeout duplicates cannot change a newer turn", () => {
+    const expired = cmd(awaiting("req-1"), { _tag: "ModelTimeout", requestId: "req-1" });
+    const newer = cmd(expired.state, { _tag: "UserMessage", text: "new", now: T0 + TIMEOUT_MS }).state;
+    expect(newer.phase).toMatchObject({ _tag: "AwaitingModel", requestId: "req-2" });
+    const late = cmd(newer, {
+      _tag: "ModelResult", requestId: "req-1",
+      outcome: { _tag: "Ok", value: { text: "old answer" } }
+    });
+    expect(late).toEqual({ state: newer, directives: [] });
+    expect(cmd(late.state, { _tag: "ModelTimeout", requestId: "req-1" }))
+      .toEqual({ state: newer, directives: [] });
+  });
+
+  it("deadline is a recovery target, not strict output expiry before timeout is processed", () => {
+    const pastDeadline = awaiting("req-1", T0 - 1);
+    const result = cmd(pastDeadline, {
+      _tag: "ModelResult", requestId: "req-1",
+      outcome: { _tag: "Ok", value: { text: "first processed wins" } }
+    });
+    expect(result.state.phase).toEqual({ _tag: "Idle" });
+    expect(result.state.messages).toEqual([{ role: "assistant", text: "first processed wins" }]);
+  });
+
   it("真的逾時才把 agent 拉回 Idle 並回報", () => {
     const { state, directives } = cmd(awaiting("req-1"), {
       _tag: "ModelTimeout",

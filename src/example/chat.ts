@@ -5,22 +5,22 @@
  * 全部都是 BEAM 上的老習慣：
  *
  * 1. **用 requestId 做關聯，對過期的回應直接丟掉。**
- *    directive 走 `this.schedule()`，那是 at-least-once 的。同一個 `ModelResult`
- *    可能送達兩次；hibernation 後醒來也可能收到上一輪的殘留。這等同 OTP 裡收到
+ *    `ModelResult` 是同步指令的結果，不是排程 callback；仍須防重複與舊回合輸入。
+ *    timeout 排程也可能重複送達。這等同 OTP 裡收到
  *    過期 monitor ref 的 `handle_info` —— 你不會去信任它，你會比對 ref 然後忽略。
  *
  * 2. **逾時用另一個 schedule，而不是取消。**
  *    成功時那個 `ModelTimeout` 還是會照樣送達，然後被第 1 點的守衛忽略掉。
  *
  * 3. **忙碌時明確拒絕，而不是排隊。**
- *    DO 是單執行緒且序列化的，沒有 BEAM 的公平調度。
+ *    DO 是單執行緒，但 await 可讓事件交錯；busy 是領域契約。
  *
  * 4. **時間不是從環境讀的。**
  *    `cmd` 裡沒有 `Date.now()`；`now` 由 shell 在邊界取好放進 action payload。
  *
  * 5. **守衛的期限寫在狀態裡，不是只寫在排程表裡。**
- *    `setState` 與 `this.schedule()` 是兩次可獨立失敗的寫入，中間的窗口在平台層面
- *    關不起來（見 `core/agent.ts` 的 `reconcile` 說明）。所以 `AwaitingModel` 帶著
+ *    `setState` 與 `this.schedule()` 在本實作不是同一交易（見 `core/agent.ts`）。
+ *    所以 `AwaitingModel` 帶著
  *    `deadlineAt`，醒來時只看狀態就能判斷「我該有守衛嗎？」並自行補回來。
  *
  * 6. **所有會被持久化的東西都有上限。**

@@ -17,14 +17,16 @@
  * 驗證失敗分支接上 migration，而不是把未驗證的資料丟給 `cmd`。
  */
 import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { Effect, Exit, Schema } from "effect";
 import { describe, expect, it } from "vitest";
-import type { ChatState } from "../src/example/chat.js";
+import { defineAction } from "../src/core/action.js";
+import { chatAgent, ChatState } from "../src/example/chat.js";
 import type { ChatAgent } from "../src/index.js";
 
 const stubFor = (name: string) => env.ChatAgent.get(env.ChatAgent.idFromName(name));
 
 /** 寫入不符 `ChatState` 的狀態：`AwaitingModel` 缺少 `deadlineAt`。 */
-const writeCorruptState = (stub: DurableObjectStub) =>
+const writeCorruptState = (stub: DurableObjectStub<ChatAgent>) =>
   runInDurableObject(stub, (instance: ChatAgent) => {
     instance.setState({
       messages: [],
@@ -34,6 +36,108 @@ const writeCorruptState = (stub: DurableObjectStub) =>
   });
 
 describe("持久狀態驗證", () => {
+  it.each([7, "7"])("validates stored seq %j as decoded state, without migration", async (seq) => {
+    const stub = stubFor(`state-type-side-${typeof seq}`);
+    await runInDurableObject(stub, async (instance: ChatAgent) => {
+      const target = instance as unknown as {
+        def: typeof chatAgent;
+        onFail: (reason: string) => void;
+      };
+      let cmdCalls = 0;
+      const failures: string[] = [];
+      target.onFail = (reason) => { failures.push(reason); };
+      target.def = {
+        ...chatAgent,
+        state: Schema.Struct({ ...ChatState.fields, seq: Schema.NumberFromString }),
+        cmd: (state, action) => {
+          cmdCalls += 1;
+          return chatAgent.cmd(state, action);
+        }
+      };
+      const stored = { messages: [], phase: { _tag: "Idle" }, seq };
+      instance.setState(stored as ChatState);
+
+      await instance.dispatch({ _tag: "ModelTimeout", requestId: "unused" });
+
+      expect(instance.state).toEqual(stored);
+      expect(cmdCalls).toBe(typeof seq === "number" ? 1 : 0);
+      if (typeof seq === "number") {
+        expect(instance.quarantined).toBeNull();
+        expect(failures).toEqual([]);
+      } else {
+        expect(instance.quarantined).not.toBeNull();
+        expect(failures).toEqual(["persisted state failed schema validation; agent quarantined"]);
+      }
+    });
+  });
+
+  it.each(["req-1", " req-1 "])("validates scheduled requestId %j without normalizing it", async (requestId) => {
+    const stub = stubFor(`scheduled-type-side-${requestId.length}`);
+    await runInDurableObject(stub, async (instance: ChatAgent) => {
+      const target = instance as unknown as {
+        def: typeof chatAgent;
+        onFail: (reason: string) => void;
+      };
+      const failures: string[] = [];
+      target.onFail = (reason) => { failures.push(reason); };
+      target.def = {
+        ...chatAgent,
+        scheduledAction: Schema.Struct({
+          _tag: Schema.Literal("ModelTimeout"),
+          requestId: Schema.Trim
+        })
+      };
+      await instance.dispatch({ _tag: "ModelTimeout", requestId: "unused" });
+      instance.setState({
+        messages: [], seq: 1,
+        phase: { _tag: "AwaitingModel", requestId: "req-1", deadlineAt: Date.now() + 60_000 }
+      });
+      const before = instance.state;
+
+      await instance.resumeAction({ _tag: "ModelTimeout", requestId });
+
+      if (requestId === "req-1") {
+        expect(instance.state.phase).toEqual({ _tag: "Idle" });
+        expect(failures).toEqual([]);
+      } else {
+        expect(instance.state).toEqual(before);
+        expect(failures).toEqual(["scheduled action failed schema validation; dropped"]);
+      }
+    });
+  });
+
+  it("malformed scheduled payload is reported and cannot enter cmd", async () => {
+    const stub = stubFor("bad-schedule-payload");
+    await runInDurableObject(stub, async (instance: ChatAgent) => {
+      const failures: string[] = [];
+      const target = instance as unknown as { onFail: (reason: string) => void };
+      target.onFail = (reason) => { failures.push(reason); };
+      const before = instance.state;
+      await instance.resumeAction({ _tag: "ModelTimeout", requestId: 42 } as never);
+      expect(failures).toEqual(["scheduled action failed schema validation; dropped"]);
+      expect(instance.state).toEqual(before);
+    });
+  });
+
+  it("runQuery initializes, rejects quarantined state, and never executes its action", async () => {
+    const stub = stubFor("query-quarantine");
+    await writeCorruptState(stub);
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, async (instance: ChatAgent) => {
+      let ran = false;
+      const query = defineAction({
+        name: "query-probe", input: Schema.Void, output: Schema.String,
+        run: () => Effect.sync(() => { ran = true; return "should not run"; })
+      });
+      const target = instance as unknown as {
+        runQuery: (action: typeof query, params: unknown) => Promise<Exit.Exit<string, unknown>>;
+      };
+      expect(Exit.isFailure(await target.runQuery(query, undefined))).toBe(true);
+      expect(instance.quarantined).not.toBeNull();
+      expect(ran).toBe(false);
+    });
+  });
+
   it("狀態不符 schema 時，agent 醒來就隔離並拒絕服務", async () => {
     const stub = stubFor("corrupt-quarantine");
     await writeCorruptState(stub);

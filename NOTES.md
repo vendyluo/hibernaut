@@ -1,281 +1,74 @@
-# Cloudflare Agents + Effect: an architecture borrowed from BEAM / Jido
+# Architecture notes
 
-*[繁體中文](./NOTES.zh-TW.md)*
+*[台灣繁體中文](./NOTES.zh-TW.md)*
 
-This skeleton is not "Effect wrapped around the Agents SDK". It is Jido's
-three-layer split (Action / Agent / AgentServer) transplanted onto Durable
-Objects as-is, because that split happens to solve the hardest problem DOs
-have: **hibernation**.
+Reviewed 2026-09-12. This document states the contract of the implementation pinned in this repository. Cloudflare's current documentation may describe a newer Agents SDK; for example, the [published `agents@0.20.1` artifact](https://registry.npmjs.org/agents/-/agents-0.20.1.tgz) used here includes partyserver lifecycle behavior but no `lifecycle.start` API. Do not assume a current-doc API exists in the pinned version. `runFiber` exists in this version; this template does not assume `startFiber`. npm metadata provides no `gitHead`, so a current GitHub commit is not treated as this version's source provenance.
 
-## Correspondence table
+## Layers and boundaries
 
-| Jido (Elixir) | Here (TypeScript) | File |
-| --- | --- | --- |
-| `Jido.Action` | `Action` — schema in/out, Effect execution | `src/core/action.ts` |
-| `Jido.Instruction` | `RunInstruction` directive | `src/core/directive.ts` |
-| `Jido.Agent` + `cmd/2` | `AgentDef` + pure `cmd` | `src/core/agent.ts` |
-| `Jido.Agent.Directive` | `Directive` | `src/core/directive.ts` |
-| `Jido.AgentServer` | `DirectiveAgent extends Agent` | `src/runtime/shell.ts` |
-| `Jido.Exec` timeout / retry / backoff | `runAction`'s `Effect.timeout` / `Effect.retry` | `src/core/action.ts` |
-| GenServer `init/1` | `onStart()` (runs on every wake) | `src/runtime/shell.ts` |
-| `%Directive.Schedule{}` | `ScheduleAction` → `this.schedule()` | `src/runtime/shell.ts` |
-| Supervision trees, `Jido.Pod` topology | **Not ported.** DOs have no supervisor | — |
-
-## The four hard rules
-
-### 1. `cmd` is a pure function — no Effect in its signature
-
-Copied from the invariants in `jido/lib/jido/agent.ex`:
-
-> - The returned `agent` is **always complete** — no "apply directives" step needed
-> - `directives` are **external effects only** — they never modify agent state
-> - `cmd/2` is a **pure function**
-
-Corollary: no `Date.now()` / `crypto.randomUUID()` inside `cmd`. Time and ids
-are captured at the boundary and passed in, or derived from the monotonic
-`seq` in state.
-
-**Note**: a state change is **not** a directive. The state `cmd` returns is
-already final. Directives are purely outbound effects. This is stricter than
-"return a list of patches and apply them" — and easier to test.
-
-### 2. Durability has exactly one owner: Cloudflare
-
-> Anything that crosses a single handler → Cloudflare (`setState` / `sql` / `schedule`)
-> Anything inside a single handler → Effect (timeout / retry / Layer / Schema)
-
-`Effect.retry`, `Effect.sleep`, `Effect.fork` all live in memory. A DO gets
-evicted after roughly 70–140 seconds of inactivity, and they vanish with it.
-Effect's own durable execution (Effect Cluster, `@effect/workflow`) —
-**do not use it**. Two coexisting durability systems end up each doing only
-half the job right.
-
-### 3. Ordering: persist state, arm the guard, then make the risky call
-
-`dispatch` order:
-
-1. `cmd` computes the complete new state → `setState` (synchronous write)
-2. `ScheduleAction` (make the timeout guard durable)
-3. `Emit` / `Fail`
-4. `RunInstruction` (the one that may never come back)
-5. `Stop`
-
-The guard must be in SQLite **before** the risky call starts. Otherwise the
-DO dies mid-call and the agent is stuck in `AwaitingModel` forever.
-
-### 4. Every echo must be safe to ignore
-
-`this.schedule()` is at-least-once. The same result can be delivered twice,
-and after hibernation you can receive leftovers from a previous round. So
-every echo carries a `requestId`, and `cmd` drops anything that doesn't
-match — the same way OTP handles a stale monitor ref.
-
-**Do not try to cancel the timeout guard.** Let it arrive and be ignored.
-In an at-least-once world, designing messages to be safely ignorable is an
-order of magnitude easier than guaranteeing non-delivery.
-
-## Where recoverability comes from
-
-Not from "queueing every step" — that costs an extra alarm round-trip of
-latency per step.
-
-It comes from **the design of the state machine**: state carries
-`AwaitingModel(requestId, deadlineAt)`, and the timeout guard is persisted
-before the call. Even if the guard write failed, waking up can re-arm or
-time out from the deadline alone. A DO dying mid-flight still gets pulled
-back to `Idle`. This is BEAM's "get it right with a state machine, not with
-retries", ported directly.
-
-That is why `executeInstruction` awaits synchronously instead of queueing.
-You get the latency *and* the recoverability.
-
-## Things NOT to port from BEAM
-
-- **Supervision trees.** DOs have no supervisor, no restart strategy, no
-  backoff, no `max_restarts`. Imitating one at the application layer only
-  produces a worse version. Error recovery comes from rules 1–4.
-- **Scheduling fairness.** A DO is single-threaded and serialized; one slow
-  call blocks every request to that agent, and there is no reduction
-  counting to preempt it. "The scheduler will handle it" is wrong here —
-  which is why the example **explicitly rejects** while busy instead of
-  queueing.
-- **`:observer` / hot code upgrades.** Don't exist. Design observability in
-  on day one.
-
-## Why `wrangler dev` is not enough
-
-Cloudflare's docs are blunt: in local development, hibernatable WebSocket
-events are delivered normally, but
-
-> the Durable Object is never evicted from memory
-
-Meaning **`wrangler dev` and miniflare never evict a DO** — you will not see
-a single hibernation bug locally. This is the most dangerous failure mode:
-all green locally, bitten every 70–140 seconds in production.
-
-So all platform-related verification goes through
-`@cloudflare/vitest-pool-workers` (tests run in real workerd), using
-`evictDurableObject()` to trigger eviction manually. It does exactly what a
-real eviction does: memory is gone, SQLite remains.
-
-The project is split into two vitest projects: `core` (pure core, zero
-platform) and `workers` (real workerd).
-
-## Verification status
-
-| Item | Result |
+| Layer | Responsibility |
 | --- | --- |
-| `npm run typecheck` | Pass |
-| `npm test` | 46/46 pass (core 25, workers 21) |
-| Spike 1 — hibernation survival | **Pass.** State intact after eviction, schedule rows still in SQLite, an expiring guard pulls the agent back to Idle, and a full conversation round completes after ManagedRuntime is rebuilt |
-| Spike 2 — cross-handler fibers | **Overturned the original assumption**, see below |
-| Spike 3 — bundle size | 2892.66 KiB raw / **543.09 KiB gzip** (full Agents SDK + Effect included). Far from the free plan's 3 MiB compressed limit |
-| E2E — Worker entry | **Pass.** `SELF.fetch()` performs a real WebSocket upgrade → `onMessage` → reply; unknown paths 404 |
+| `src/core/` | State/action types, pure `cmd`, directives, and turn-guard calculations |
+| `src/runtime/shell.ts` | Agents SDK boundary, state and scheduled-payload validation, dispatch, scheduling, WebSockets, Effect runtime |
+| `src/example/chat.ts` | One bounded echo-chat state machine and one Effect-based Action |
+| `src/index.ts` | Worker routing, Durable Object class, and provider layer |
 
-`test/chat.test.ts` imports neither `agents`, miniflare, wrangler,
-ManagedRuntime nor Layer. The agent's entire decision logic is testable with
-zero platform — that is what rule 1 buys.
+`cmd(state, action)` synchronously returns the complete next state plus descriptions of outbound effects. Time and identifiers are explicit inputs. The pure command path is platform-free, although `src/core/action.ts` imports Effect to define and run Actions.
 
-## Correction to Spike 2
+Cloudflare storage and Agents SDK schedules own state that must cross activations. Effect timeout and retry apply only inside the current Action execution. For durable task execution, evaluate the platform's documented choices instead of extending in-memory fibers:
 
-The original assumption: a forked fiber doing I/O later would throw
-`Cannot perform I/O on behalf of a different request`.
+- [Schedule tasks](https://developers.cloudflare.com/agents/runtime/execution/schedule-tasks/)
+- [Durable execution](https://developers.cloudflare.com/agents/runtime/execution/durable-execution/)
+- [Run Workflows](https://developers.cloudflare.com/agents/runtime/execution/run-workflows/)
 
-**Measured: it does not.** A DO's `ctx.storage` is bound to the object
-itself, not to a particular request; cross-handler access is legal (that
-error actually polices objects captured from a *different incoming
-request*).
+## Hibernation is eligibility, not a timer
 
-But the real danger didn't disappear — it changed names: **nobody awaits a
-forked fiber, the DO can be reclaimed while it is mid-flight, and
-half-finished work vanishes silently** — no exception, no log, no alert.
-The second test in `test-workers/io-context.test.ts` pins this down.
+A Durable Object can normally hibernate only while idle and when nothing prevents hibernation: no timers, in-progress awaited fetch, active event, standard WebSocket, or outbound socket. Cloudflare documents a 10-second idle period for normal hibernation eligibility. The documented 70–140 second range concerns eviction of an idle object that cannot hibernate; it is not a periodic wake-up or service-level guarantee. Deployments and restarts can also discard memory.
 
-Same conclusion, different reason: don't carry cross-handler work on
-`Effect.fork`. Not because the platform stops you — because **it doesn't**.
-It just quietly disappears.
+Therefore every in-memory runtime, layer, and fiber is a cache or current-handler mechanism, never durable state. Local `wrangler dev` does not reproduce production eviction timing; workers tests explicitly evict the object to verify reconstruction while preserving storage.
 
-## Post-review fixes (round two)
+Source: [Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
 
-An external review raised four issues. All valid, all fixed. The most
-valuable was the second — it hit something I had claimed was already solved.
+## Dispatch and initialization
 
-### 1. The Worker entry was never wired up (CRIT)
+For each action, the shell computes and persists the complete next state, orders scheduled guards before emissions and instructions, then executes directives. State persistence and schedule creation are **not one transaction in this implementation**. No broader claim is made about every platform storage API.
 
-`export default { fetch: () => new Response("ok") }` was a placeholder;
-`ChatAgent` was unreachable from the outside. Switched to
-`routeAgentRequest(request, env)` and added `test-workers/route.test.ts` —
-an E2E that performs a real WebSocket upgrade via `SELF.fetch()`.
+Initialization validates stored state, runs the subclass's idempotent `onWake`, and reconciles the state. It is single-flight, and failed `onWake` attempts can be retried. Internal instruction-result dispatch uses a private initialized path so initialization never waits on itself. Native RPC or tests can bypass normal SDK lifecycle entries, so they must reach initialization through the shell's public entry points or initialize explicitly. WebSocket SDK RPC is a separate transport concern.
 
-The other Workers tests all drive the DO directly via
-`env.ChatAgent.get(...)`, which **bypasses the integration entry** — they
-stay green even when the entry is broken. That path needs its own test.
+Keep `onWake` bounded and reconstructible; do not perform slow provider calls there. Never call public `dispatch`, `reconcileNow`, or `runQuery` from initialization: they wait for initialization and would self-deadlock.
 
-### 2. `setState` succeeds but `schedule` fails → stuck in `AwaitingModel` forever
+The Action timeout starts after ManagedRuntime has acquired its layer; it does not bound `onWake` or layer acquisition. The echo uses `Layer.succeed`. If you replace it with asynchronous initialization, provide a separate bounded acquisition/failure policy; `runQuery` has no scheduled turn guard to compensate for a stalled layer.
 
-I had written in `shell.ts` that "persisting state first means the worst
-case is an unsent effect, which the timeout guard can recover, **because the
-guard itself is in state**". That last clause was wrong: the guard lives in
-`cf_agents_schedules`, produced by a separate write that can fail
-independently. The old hibernation tests only proved "a successfully
-scheduled guard survives eviction" — they never touched "the guard was never
-scheduled at all".
+The shell intentionally exposes no public generic `dispatch`, `reconcile`, or `runQuery` endpoint to untrusted clients. Any application-specific RPC needs its own validation and authorization.
 
-And this window **cannot be closed at the platform level**: DOs only offer
-the synchronous `ctx.storage.transactionSync()`, which cannot span an
-`await`, while `schedule()` is async. So reconciliation is not a compromise
-— it is the only solution.
+## Guarded turn contract
 
-The fix:
+The example persists `AwaitingModel(requestId, deadlineAt)`, then schedules a 60-second `ModelTimeout`, then runs the provider instruction. These are application policies, not Worker limits. The Action has a 25-second timeout across its configured in-handler retries; that is also not a 30-second Worker wall-clock claim.
 
-- `AwaitingModel` goes from `{ requestId }` to `{ requestId, deadlineAt }` —
-  **the deadline lives in state**; repair reads state only, never the
-  schedule table.
-- `AgentDef.reconcile(state, now)`: a pure function answering "which action
-  repairs me back to consistency". `now` is injected by the shell; rule 1
-  still holds.
-- `schedule()` always passes `idempotent: true`, so re-arming never grows
-  duplicate rows.
-- If scheduling fails, run that action on the spot and terminate the rest of
-  the directive batch: the round fails early, but it neither deadlocks nor
-  keeps calling the model without a guard.
+The template's `ScheduleAction` is safe only for early, terminal guards. If guard scheduling fails, the shell immediately dispatches the guard action and aborts all remaining directives in that batch. It is not a general-purpose scheduler.
 
-### 3. `AgentDef.state` claimed validation but was never used
+SDK scheduling with `idempotent: true` deduplicates the callback, serialized payload, and schedule type. It does not update an existing due time, and it does not make downstream side effects exactly once. This statement is limited to the pinned version and covered behavior.
 
-The comment said "validated at the trust boundary"; the implementation had
-not a single line. Now actually decoded in `initializeOnce()`.
+If a guard is missing and the object crashes, repair needs another activation; there is no self-wake guarantee. An existing guard may wake the object later, but its deadline is a recovery target, not an SLA. Before the deadline, recovery ensures a guard exists; on expiry it moves the state to `Idle` and emits an error. It never resumes or replays an interrupted provider call: its result may be lost, while an external effect may have happened with an unknown outcome.
 
-**The default policy for bad state is quarantine**: raw data stays untouched
-in SQLite for human inspection; the agent refuses service and reports.
-No silent reset (which silently eats user data), no running anyway (`cmd`
-may throw or fall into an unmatched branch). This is a changeable product
-decision, not a technical conclusion.
+Provider results carry `requestId`. A matching result and timeout race through the same state machine; the first one processed wins, and the later one is ignored. The deadline does not strictly invalidate output before the timeout action is processed.
 
-### 4. Unbounded growth of input and history
+## Delivery and concurrency semantics
 
-`MAX_MESSAGE_CHARS` (4096) and `MAX_HISTORY_MESSAGES` (40), shared across
-three places: the boundary rejects by UTF-8 bytes, `cmd` truncates, the
-schema enforces the invariant. Model output is truncated the same way —
-otherwise an overlong reply makes the next wake's state validation fail and
-quarantines the agent.
+Durable Object alarms are at-least-once. For an alarm handler ending in an uncaught exception, Cloudflare documents automatic retries with exponential backoff, up to six retries starting at two seconds. An Agents SDK scheduled callback has the SDK's own callback/retry policy; this template does not promise perpetual delivery. See [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/).
 
-### One more thing found while fixing these
+Await points permit interleaving, so the explicit busy rejection prevents overlapping turns; it does not mean every slow await blocks every request. Emissions are best effort and there is no outbox. Provider retries can repeat effects: use provider-supported idempotency keys and reconciliation/compensation where necessary. This template does not guarantee exactly-once external effects.
 
-`onStart()` is triggered by partyserver's `#ensureInitialized()`, which
-**only fires on the SDK's real entries** (`fetch` / `alarm` /
-`webSocketMessage`). Any path that bypasses those entries and calls methods
-directly (RPC, facets, `runInDurableObject`) never runs it.
+Persisted state and scheduled payloads are schema-validated on activation/callback. Invalid state is quarantined without silent reset; invalid scheduled payloads are dropped and reported. The implementation has bounds on input and retained history, but no general schema migration mechanism.
 
-So validation and repair cannot hang off `onStart()` alone — invariants must
-not depend on which door the caller came through. They now live in
-`initializeOnce()`, jointly guaranteed by `onStart()`, `dispatch()` and the
-public `reconcileNow()`. Initialization is single-flight via a shared
-Promise: concurrent callers await the same round, and a failure is never
-mistakenly recorded as completed. Instruction results produced *inside*
-initialization must also stay on that private path; going back through the
-public `dispatch()` would await the still-unfinished initialization Promise
-— an instant deadlock.
+These boundaries use `Schema.validateEither`: stored values must already satisfy the schema's decoded **Type** side and be JSON-compatible. The shell does not call schema encoders or apply transformations on recovery. For example, `NumberFromString` requires a stored number, not a numeric string; `Trim` rejects untrimmed scheduled IDs rather than changing their identity. Action inputs are different: `runAction` explicitly decodes them before execution. Schema changes requiring migration need a separate, deliberate data-migration procedure.
 
-## Backflow from the first real app (round three)
+## Security and intended use
 
-After building the first real application on this skeleton (a tool-calling
-shop-assistant agent), four friction points — places the app either worked
-around or copied verbatim — flowed back into the base:
+`validateStateChange` rejects client-originated state updates so they cannot mutate `cf_agent_state` through the state protocol while ordinary text messages continue to work. Do not substitute the readonly-connection hook on this SDK version: it also prevents server state writes within that connection's handler. This is hardening, not authentication. There is no authentication, tenant authorization, or rate limiting. Every connection using the same room name receives that room's shared history. Do not expose the example publicly before adding those controls.
 
-- **`core/turn.ts`, the turn-guard toolkit**: the `reconcile` decision was
-  duplicated word-for-word across both agents — that is a base invariant,
-  not business logic. `nextRequest` / `guardDeadline` / `reconcileTurn`.
-- **`AgentDef.scheduledAction`**: schedule-table payloads cross the same
-  SQLite trust boundary as state; `resumeAction` now validates on wake and
-  drops malformed rows with a report instead of feeding them to `cmd`.
-- **`DirectiveAgent.runQuery`**: the sanctioned read-only path (awaits
-  initialization, respects quarantine). The first app reached into
-  `this.runtime` to run an action directly and bypassed quarantine — the
-  bug got promoted into an affordance.
-- **The text-input boundary**: byte limit, rejected reporting and clock
-  injection moved into the shell (`maxInputBytes` / `textAction`); apps no
-  longer copy the `onMessage` boilerplate.
+`runQuery` is a convention for an initialized, quarantine-aware query path; it cannot prove that an Action or external provider has no side effects. The template also does not promise a supervisor, generic tool loop, replay of interrupted calls, outbox delivery, or exactly-once behavior.
 
-Deliberately **not** backflowed: the tool-calling loop itself. The second
-consumer's state machine won't be a plain chat loop; extracting now would
-extract the wrong shape — wait for the third real copy.
+## Verification and release
 
-## Incidental observation
-
-The tables actually created inside the DO include `cf_agents_fibers`,
-`cf_agents_workflows`, `cf_agents_runs` — the Agents SDK ships its own
-durable execution. Add Effect's side (Effect Cluster, `@effect/workflow`)
-and **two durable-execution systems in one process is a real risk, not a
-hypothetical**. Rule 2 is not fastidiousness; it is necessary.
-
-## Not done yet
-
-- **Never actually deployed.** Everything above was verified in local
-  workerd (miniflare). The *timing* of real evictions (70–140s) cannot be
-  simulated, and `runDurableObjectAlarm()` fires immediately rather than
-  waiting. What was verified is "can it pick up after an eviction", not
-  "evicted after N seconds".
-- `ModelClientLive` is an echo stub; Workers AI / AI Gateway not wired yet.
-- `agents` is `^0.20.1` — pre-1.0, README explicitly not accepting external
-  PRs, `experimental/` has no stability guarantees. Pin the version and be
-  ready to track migrations.
+Use `npm ci`, `npm run typecheck`, `npm test`, the focused core/workers suites, `npm run smoke` against local dev, and `npm run build` for a Wrangler dry run. Recorded evidence, rather than historical counts or bundle measurements in prose, belongs in [RELEASE.md](./RELEASE.md). Dependency attribution is in [THIRD_PARTY.md](./THIRD_PARTY.md).

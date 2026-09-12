@@ -1,13 +1,8 @@
 /**
- * Spike 1：hibernation 存活，以及 schedule 沒寫成功時的自我修復。
+ * 持久狀態、排程守衛與初始化恢復。
  *
- * 這是整份設計最關鍵、也是 `wrangler dev` **測不到**的一件事。Cloudflare 文件寫得很直白：
- * 本地開發時 hibernatable WebSocket 的事件照常送達，但
- *
- *   > the Durable Object is never evicted from memory
- *
- * 所以 `wrangler dev` 永遠是綠的，然後上線後每 70–140 秒被咬一次。
- * `evictDurableObject()` 做的正好是真實驅逐做的事：記憶體沒了，SQLite 還在。
+ * 用本地 workerd 強制丟棄實例，驗證 SQLite 狀態重建。
+ * 不驗證真實平台的休眠資格、驅逐時間或 alarm 送達時序。
  */
 import {
   env,
@@ -21,30 +16,30 @@ import type { ChatAgent } from "../src/index.js";
 
 const stubFor = (name: string) => env.ChatAgent.get(env.ChatAgent.idFromName(name));
 
-const phaseOf = async (stub: DurableObjectStub) =>
+const phaseOf = async (stub: DurableObjectStub<ChatAgent>) =>
   runInDurableObject(stub, (instance: ChatAgent) => (instance.state as ChatState).phase);
 
 /**
  * 走真實入口把 DO 叫醒。
  *
  * `runInDurableObject()` 是直接戳實例的方法，會**繞過** partyserver 的
- * `#ensureInitialized()`，也就繞過 `onStart()`。真實環境的喚醒一律經過
- * `fetch` / `alarm` / `webSocketMessage`，所以這裡用 `fetch` 才測得到醒來時的修復。
+ * `#ensureInitialized()`，也就繞過 `onStart()`。這裡另用 `fetch` 驗證 SDK 入口。
  */
 const wake = async (stub: DurableObjectStub) => {
-  await stub.fetch("https://example.com/_wake").catch(() => undefined);
+  const response = await stub.fetch("https://example.com/_wake");
+  expect(response.status).toBeLessThan(500);
 };
 
 const scheduleRows = async (stub: DurableObjectStub) =>
-  runInDurableObject(stub, (instance: ChatAgent) =>
-    instance.ctx.storage.sql
+  runInDurableObject(stub, (_instance, ctx) =>
+    ctx.storage.sql
       .exec("SELECT callback, payload, type FROM cf_agents_schedules")
       .toArray()
   );
 
-/** 製造「呼叫已發出、狀態已記錄、守衛已排程」的中間態 —— DO 最可能死掉的那一刻。 */
+/** 直接寫入等待中的 state，選擇是否建立守衛；不會真的發出 provider 呼叫。 */
 const enterAwaitingModel = async (
-  stub: DurableObjectStub,
+  stub: DurableObjectStub<ChatAgent>,
   requestId: string,
   opts: { deadlineInMs?: number; armGuard?: boolean; delaySeconds?: number } = {}
 ) => {
@@ -81,7 +76,7 @@ describe("Durable Object 驅逐", () => {
 
     await evictDurableObject(stub);
 
-    // 全新實例：記憶體裡的東西不見了。這正是 hibernation 之後的樣子。
+    // 驗證本地強制驅逐確實換成全新實例，不推論正常 hibernation 時序。
     await runInDurableObject(stub, (instance: ChatAgent) => {
       expect((instance as unknown as Record<string, unknown>).__marker).toBeUndefined();
     });
@@ -119,13 +114,13 @@ describe("Durable Object 驅逐", () => {
     const stub = stubFor("guard-recovers");
     await enterAwaitingModel(stub, "req-1");
 
-    // 模擬「模型呼叫途中 DO 被回收」：記憶體沒了，排程還在 SQLite 裡。
+    // 驅逐刻意寫入的等待狀態；沒有中斷真實 provider 呼叫。
     await evictDurableObject(stub);
 
     // 把時鐘往前撥。`runDurableObjectAlarm()` 會立刻叫起 alarm handler，
     // 但 Agents SDK 的 handler 只處理 `time <= now` 的列，所以要先讓它到期。
-    await runInDurableObject(stub, (instance: ChatAgent) => {
-      instance.ctx.storage.sql.exec(
+    await runInDurableObject(stub, (_instance, ctx) => {
+      ctx.storage.sql.exec(
         "UPDATE cf_agents_schedules SET time = ?",
         Math.floor(Date.now() / 1000) - 1
       );
@@ -255,6 +250,46 @@ describe("守衛沒排成功時的自我修復", () => {
 });
 
 describe("初始化只完成一次，而且所有呼叫都等待同一輪", () => {
+  it("failed initialization rejects all waiters and retries before running cmd", async () => {
+    const stub = stubFor("initialization-failure-retry");
+    await runInDurableObject(stub, async (instance: ChatAgent) => {
+      const target = instance as unknown as { onWake: () => Promise<void> };
+      let attempts = 0;
+      target.onWake = async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("wake unavailable");
+      };
+      const action = { _tag: "UserMessage", text: "retry", now: Date.now() } as const;
+      const results = await Promise.allSettled([
+        instance.dispatch(action), instance.dispatch(action)
+      ]);
+      expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+      expect(attempts).toBe(1);
+      expect(instance.state).toEqual({ messages: [], phase: { _tag: "Idle" }, seq: 0 });
+      await instance.dispatch(action);
+      expect(attempts).toBe(2);
+      expect(instance.state.messages.map((message) => message.text)).toEqual(["retry", "echo: retry"]);
+      await instance.reconcileNow();
+      expect(attempts).toBe(2);
+    });
+  });
+
+  it("delayed schedule deduplication preserves the original due time", async () => {
+    const stub = stubFor("schedule-dedupe-not-reschedule");
+    await runInDurableObject(stub, async (instance: ChatAgent) => {
+      const payload = { _tag: "ModelTimeout", requestId: "req-original" } as const;
+      const first = await instance.schedule(600, "resumeAction", payload, { idempotent: true });
+      const repeated = await instance.schedule(10, "resumeAction", payload, { idempotent: true });
+      expect(repeated.id).toBe(first.id);
+      expect(repeated.time).toBe(first.time);
+      const different = await instance.schedule(10, "resumeAction", {
+        ...payload, requestId: "req-other"
+      }, { idempotent: true });
+      expect(different.id).not.toBe(first.id);
+      expect(different.time).toBeLessThan(first.time);
+    });
+  });
+
   it("第二個 dispatch 不會越過仍在進行的 onWake", async () => {
     const stub = stubFor("initialization-single-flight");
 
