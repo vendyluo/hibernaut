@@ -13,6 +13,9 @@ import { Data, Duration, Effect, Schedule, Schema } from "effect";
 export class ActionError extends Data.TaggedError("ActionError")<{
   readonly action: string;
   readonly message: string;
+  readonly phase?: "input" | "execution" | "output";
+  /** Provider adapter decides whether this failure can safely be retried. */
+  readonly retryable?: boolean;
 }> {}
 
 export interface RetryPolicy {
@@ -20,6 +23,8 @@ export interface RetryPolicy {
   readonly maxRetries: number;
   /** 初始退避，每次加倍。對應 jido_action 的 `:backoff`。 */
   readonly backoffMs: number;
+  /** Product policy; default retries only explicitly retryable execution failures. */
+  readonly shouldRetry?: (error: ActionError) => boolean;
 }
 
 export interface Action<I, O, R = never> {
@@ -61,14 +66,27 @@ export const runAction = <I, O, R>(
   action: Action<I, O, R>,
   params: unknown,
 ): Effect.Effect<O, ActionError, R> => {
-  const wrap = (message: string) => new ActionError({ action: action.name, message });
+  const wrap = (message: string, phase: "input" | "execution" | "output") =>
+    new ActionError({ action: action.name, message, phase });
 
   const executed = Schema.decodeUnknownEffect(action.input)(params).pipe(
-    Effect.mapError((e) => wrap(`invalid input: ${e.message}`)),
-    Effect.flatMap(action.run),
+    Effect.mapError((e) => wrap(`invalid input: ${e.message}`, "input")),
+    Effect.flatMap((input) =>
+      action.run(input).pipe(
+        Effect.mapError(
+          (error) =>
+            new ActionError({
+              action: error.action,
+              message: error.message,
+              retryable: error.retryable,
+              phase: "execution",
+            }),
+        ),
+      ),
+    ),
     Effect.flatMap((out) =>
       Schema.decodeUnknownEffect(Schema.toType(action.output))(out).pipe(
-        Effect.mapError((e) => wrap(`invalid output: ${e.message}`)),
+        Effect.mapError((e) => wrap(`invalid output: ${e.message}`, "output")),
       ),
     ),
   );
@@ -79,12 +97,15 @@ export const runAction = <I, O, R>(
       : Effect.retry(executed, {
           times: action.retry.maxRetries,
           schedule: Schedule.exponential(Duration.millis(action.retry.backoffMs)),
+          while:
+            action.retry.shouldRetry ??
+            ((error) => error.phase === "execution" && error.retryable === true),
         });
 
   return retried.pipe(
     Effect.timeoutOrElse({
       duration: Duration.millis(action.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      orElse: () => Effect.fail(wrap("timed out")),
+      orElse: () => Effect.fail(wrap("timed out", "execution")),
     }),
   );
 };

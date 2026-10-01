@@ -12,6 +12,10 @@ Reviewed 2026-09-12. This document states the contract of the implementation pin
 | `src/runtime/shell.ts` | Agents SDK boundary, state and scheduled-payload validation, dispatch, scheduling, WebSockets, Effect runtime |
 | `src/example/chat.ts` | One bounded echo-chat state machine and one Effect-based Action |
 | `src/index.ts` | Worker routing, Durable Object class, and provider layer |
+| `src/example/task-agent.ts` | Long-task receipts, deduplication, terminal outcomes, termination intent and durable reconciliation |
+| `src/example/task-workflow.ts` | Durable Workflow steps, bounded retries, approval waits and terminal publication |
+| `src/core/task.ts` | Job data contracts and versioned product policies |
+| `src/runtime/task-http.ts` | Demo HTTP submission, inspection, approval and cancellation |
 
 `cmd(state, action)` synchronously returns the complete next state plus descriptions of outbound effects. Time and identifiers are explicit inputs. The pure command path is platform-free, although `src/core/action.ts` imports Effect to define and run Actions.
 
@@ -20,6 +24,26 @@ Cloudflare storage and Agents SDK schedules own state that must cross activation
 - [Schedule tasks](https://developers.cloudflare.com/agents/runtime/execution/schedule-tasks/)
 - [Durable execution](https://developers.cloudflare.com/agents/runtime/execution/durable-execution/)
 - [Run Workflows](https://developers.cloudflare.com/agents/runtime/execution/run-workflows/)
+
+## Long-task product contract — 2026-10-01
+
+The primary example follows `submitting → queued/running/waiting → succeeded/failed/cancelled`. `submitting` reserves identity and input without confirmed acceptance. HTTP `202` confirms that the Workflow exists and a durable watcher is armed. One owner/key identifies one Workflow; changing the request under that key is rejected. Retry a lost acceptance response with the same key.
+
+The SQLite receipt, SDK interval schedule and Workflow creation are not a distributed transaction. Reserve identity synchronously, arm the watcher, then create or confirm the same Workflow ID. An interruption before acceptance can leave a receipt: an armed watcher repairs it automatically; a receipt without a watcher needs resubmission or inspection with the same key to rearm recovery. That window never returns acceptance. Failed creation is followed by inspection of the same ID to distinguish a lost successful response from an unconfirmed result.
+
+Workflows retains completed steps and event waits independently of Agent eviction or client connections. It does not resume the original Promise; unfinished external steps may execute again. Provider steps receive stable idempotency keys, which adapters must actually use or replace with reconciliation/compensation. The example's deterministic echo is repeatable; it does not establish exactly-once behavior for a real provider.
+
+Both policies permit two durable retries. `transient-only` permits execution failures explicitly marked retryable by the adapter. `regenerate` also permits regeneration after output validation fails. Invalid input is not retried. Actions have a 25-second budget, Workflow steps a 30-second timeout; unclassified/permanent failures and application timeouts are not retried automatically. Platform interruption can still replay unfinished steps, requiring idempotency. Workflow execution does not add an in-handler Action retry loop.
+
+Optional approval waits expire after 24 hours. A durable progress step explicitly records product-level `waiting`: the local Workflow engine can report `running` during `waitForEvent`. Platform execution status is not used as the sole source of product waiting state.
+
+The Workflow publishes terminal outcomes through durable steps. A 60-second interval watcher repairs lost publication, interrupted creation and the 25-hour overall deadline. Cancellation/deadline intent is persisted before terminating the Workflow, so recovery between platform termination and receipt settlement preserves the right reason. A confirmed terminal outcome wins completion/termination races; late results cannot overwrite it. Cancellation does not undo external effects.
+
+Agent SQLite retains terminal receipts and outputs. Watcher cleanup failures do not reverse terminal outcomes; subsequent ticks retry cleanup. Each key owns an independent watcher, so settling one job cannot remove another job's wake-up. Receipts are not deleted by this example: define retention, quotas and deduplication windows for production. Retained receipts do not depend on Workflow history retention.
+
+The promise assumes continuing availability of Cloudflare storage, alarms, Workflows and a compatible deployment. Outages delay retries and deadline handling; the 60-second cadence is not a completion SLA. Disabling service, deleting bindings/namespaces or incompatibly replacing in-flight contracts breaks the promise. Keep `hibernaut-task-v1`, step names and accepted-job policy semantics; add versions for new contracts.
+
+The task HTTP example has no authentication, owner authorization or quota enforcement and must not be exposed publicly as-is. A room name is not an authorization boundary. Platform contracts: [Workers API](https://developers.cloudflare.com/workflows/build/workers-api/) and [sleeping and retrying](https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/).
 
 ## Hibernation is eligibility, not a timer
 
@@ -42,6 +66,8 @@ The Action timeout starts after ManagedRuntime has acquired its layer; it does n
 The shell intentionally exposes no public generic `dispatch`, `reconcile`, or `runQuery` endpoint to untrusted clients. Any application-specific RPC needs its own validation and authorization.
 
 ## Guarded turn contract
+
+This section describes the retained chat example. Long tasks use the Workflow path above instead of chat timeout guards.
 
 The example persists `AwaitingModel(requestId, deadlineAt)`, then schedules a 60-second `ModelTimeout`, then runs the provider instruction. These are application policies, not Worker limits. The Action has a 25-second timeout across its configured in-handler retries; that is also not a 30-second Worker wall-clock claim.
 

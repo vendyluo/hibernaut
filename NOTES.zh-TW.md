@@ -12,6 +12,10 @@
 | `src/runtime/shell.ts` | Agents SDK 邊界、state 與 scheduled payload 驗證、dispatch、排程、WebSocket、Effect runtime |
 | `src/example/chat.ts` | 一個有容量上限的 echo chat 狀態機與一個 Effect-based Action |
 | `src/index.ts` | Worker routing、Durable Object class 與 provider layer |
+| `src/example/task-agent.ts` | 長任務收據、接受去重、終態、取消意圖與持久補查 |
+| `src/example/task-workflow.ts` | Workflows 持久步驟、有限重試、人工確認與終態回寫 |
+| `src/core/task.ts` | 工作資料契約與版本化產品策略 |
+| `src/runtime/task-http.ts` | 工作提交、查詢、確認與取消的示範 HTTP transport |
 
 `cmd(state, action)` 同步回傳完整的新 state 與出站效果描述；時間與 identifier 都是明確輸入。純 command 路徑不依賴平台，但 `src/core/action.ts` 會 import Effect 來定義及執行 Actions。
 
@@ -20,6 +24,26 @@
 - [排程任務](https://developers.cloudflare.com/agents/runtime/execution/schedule-tasks/)
 - [Durable execution](https://developers.cloudflare.com/agents/runtime/execution/durable-execution/)
 - [執行 Workflows](https://developers.cloudflare.com/agents/runtime/execution/run-workflows/)
+
+## 長任務產品契約 — 2026-10-01
+
+主要範例的工作生命週期為 `submitting → queued/running/waiting → succeeded/failed/cancelled`。`submitting` 是已保留識別與內容、尚未確認接受的內部狀態；HTTP `202` 只在 Workflow 存在且持久 watcher 已建立後回覆。相同 owner/key 對應同一個 Workflow ID，內容不同則拒絕；接受回應遺失時，用原 key 重送，不能換 key 猜測是否成功。
+
+SQLite 收據、SDK interval schedule 與 Workflow 建立不是跨系統交易。先同步保留工作識別，再建立 watcher，最後建立／確認同 ID 的 Workflow。接受前的中斷可能留下未接受收據；有 watcher 的收據會自動補建，沒有 watcher 的收據需重送或查詢原 key，重新建立 watcher 才能繼續。這個窗口不會回覆接受成功。Workflow create 失敗後會查詢同 ID，以區分已建立但回應遺失與仍未確認的結果。
+
+Workflows 保存完成步驟與等待事件；Agent 驅逐或 client 離線不會丟失工作。它不是原 Promise 的續跑，未完成的外部步驟仍可能重新執行。每個 provider 步驟有穩定 idempotency key；provider adapter 要實際使用該 key，或提供查核／補償。範例是可重做的 deterministic echo，不宣稱真實 provider 的 exactly-once 行為。
+
+兩種策略目前都允許最多兩次 durable retry。`transient-only` 只允許 adapter 明確標記可重試的執行失敗；`regenerate` 另外允許 output 驗證失敗後重新生成。Input 驗證失敗不重試。Action 預算為 25 秒，Workflow step 上限為 30 秒，未標記的未知／永久失敗與應用 timeout 不自動重試。平台中斷仍可能重做未完成步驟，這是冪等契約的另一個必要原因。Workflow 不疊加 Action 的 in-handler retry。
+
+可選的人工確認最多等待 24 小時。產品的 `waiting` 由明確的持久進度步驟設定，因為本機 Workflows 在 `waitForEvent` 期間仍可能回報 `running`。不把平台的執行狀態直接當成產品的等待狀態。
+
+Workflow 以持久步驟回寫終態，60 秒 interval watcher 補查回寫遺失、建立中斷與整體 25 小時期限。取消或逾時的停止意圖先保存，再 terminate Workflow；若中斷發生在停止成功與收據結案之間，watcher 仍能區分取消與逾時失敗。完成與停止競爭時，保留已確認的終態，晚到結果不得覆寫。取消不撤銷外部效果。
+
+終態與輸出保留在 Agent SQLite。清理 watcher 失敗不會推翻終態，之後的 watcher 會再清理；每個 key 擁有獨立 watcher，不會因一個工作結案而移除另一個工作的喚醒來源。範例不刪除收據；正式產品需訂保留期限、配額與去重窗口。Workflow 的執行紀錄有平台保留期限，但已保存的收據不依賴它。
+
+這個承諾以 Cloudflare storage、alarms、Workflows 與有效 deployment 持續可用為前提。平台中斷會延後重試與期限處理；60 秒是補查 cadence，不是完成時間 SLA。停止服務、刪除 binding／namespace 或不相容地替換工作版本會破壞承諾。保留 `hibernaut-task-v1`、步驟名稱與已接受工作的政策語意；新契約應新增版本。
+
+目前 task HTTP 範例沒有身分驗證、owner 授權或配額，不能直接公開。這些是產品正式交付前的必要邊界，不由 room 名稱提供隔離保證。Workflows API 與持久步驟契約見 [Workers API](https://developers.cloudflare.com/workflows/build/workers-api/) 與 [sleeping and retrying](https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/)。
 
 ## Hibernation 是資格條件，不是計時器
 
@@ -42,6 +66,8 @@ Action timeout 在 ManagedRuntime 完成 Layer 建立後才開始，不涵蓋 `o
 shell 刻意不把通用 `dispatch`、`reconcile` 或 `runQuery` endpoint 公開給不受信任的 client。應用自己的 RPC 必須另做驗證與授權。
 
 ## Guarded turn 契約
+
+以下是保留的聊天範例契約；長任務使用上述 Workflows 路徑，不靠聊天的 timeout guard 執行工作。
 
 範例先持久化 `AwaitingModel(requestId, deadlineAt)`，再排 60 秒的 `ModelTimeout`，最後執行 provider instruction。這些是 application policy，不是 Worker limit。Action 在其設定的 in-handler retries 整體上有 25 秒 timeout；這也不是宣稱 Worker 有 30 秒 wall-clock 限制。
 

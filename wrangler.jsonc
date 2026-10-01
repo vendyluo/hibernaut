@@ -5,8 +5,15 @@
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
-    "bindings": [{ "name": "ChatAgent", "class_name": "ChatAgent" }]
+    "bindings": [
+      { "name": "ChatAgent", "class_name": "ChatAgent" },
+      { "name": "TaskAgent", "class_name": "TaskAgent" }
+    ]
   },
   // Agents SDK 需要 SQLite-backed Durable Object。
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatAgent"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ChatAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["TaskAgent"] }
+  ],
+  "workflows": [{ "binding": "TaskWorkflow", "name": "hibernaut-task-v1", "class_name": "TaskWorkflow" }]
 }

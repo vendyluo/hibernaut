@@ -14,6 +14,9 @@ import {
   type ChatState,
 } from "./example/chat.js";
 import { DirectiveAgent } from "./runtime/shell.js";
+import { routeTaskRequest } from "./runtime/task-http.js";
+export { TaskAgent } from "./example/task-agent.js";
+export { TaskWorkflow } from "./example/task-workflow.js";
 
 /**
  * 正式實作應該在這裡接 Workers AI binding 或 AI Gateway。
@@ -52,6 +55,8 @@ export class ChatAgent extends DirectiveAgent<Cloudflare.Env, ChatState, ChatAct
 
 export default {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
+    const taskResponse = await routeTaskRequest(request, env);
+    if (taskResponse) return taskResponse;
     return (await routeAgentRequest(request, env)) ?? new Response("Not found", { status: 404 });
   },
 };

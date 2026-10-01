@@ -1,13 +1,16 @@
 # hibernaut
 
-一份範圍刻意收窄、能感知 hibernation 的 Cloudflare Durable Object agent GitHub 模板。它是可執行的 echo 範例與可複製的架構，不是 runtime，也不是 npm package。
+一份以持久長任務為主的 Cloudflare agent GitHub 模板。Agent 接受工作與保存收據，Workflows 執行持久步驟、重試與等待；工作不依賴聊天連線或 Agent 實例持續存活。它是可執行的範例與可複製的架構，不是 npm package。
 
-它處理一種具體失敗：記憶體中的 provider 呼叫消失，持久狀態卻還停在「等待」。Request ID、timeout 守衛與啟動時 reconciliation 恢復的是領域狀態，不是中斷的呼叫；若守衛尚未建立，仍需要另一個事件喚醒。
+主要契約是：回覆接受成功後，持續追蹤到成功、失敗或取消，並保存可重新查詢的終態。重試與恢復必須符合產品政策；這不保證外部副作用 exactly once。原本的 guarded chat 保留為另一種產品契約：中斷後恢復領域狀態，不續跑 provider 呼叫。
 
 *[English](./README.md)*
 
 ## 內含內容
 
+- `src/example/task-agent.ts`：持久工作收據、相同 key 去重、狀態查詢、確認、取消與 alarm 補查。
+- `src/example/task-workflow.ts`：持久步驟、可跨重啟的人工確認等待與終態回寫。
+- `src/core/task.ts`：工作契約與可替換的 `transient-only`／`regenerate` 產品策略。
 - `src/example/chat.ts`：有容量上限、request 關聯、持久逾時守衛與醒來時 reconciliation 的聊天狀態機。
 - `src/index.ts`：Cloudflare 入口與只做 echo 的 `ModelClient` layer。
 - `src/core/`：純狀態轉移與 directive 描述。Action 會 import Effect；`cmd` 本身不依賴平台。
@@ -54,6 +57,7 @@ npm run dev
 
 ```bash
 npm run smoke
+npm run smoke:tasks
 ```
 
 smoke test 會連到唯一 room：
@@ -72,7 +76,25 @@ npm run build
 
 已記錄的驗證證據與 release preflight 請見 [RELEASE.md](./RELEASE.md)。不要從本 README 推論目前的測試數量或 bundle 限制。
 
-## 改成你的 agent
+## 長任務與產品策略
+
+```bash
+curl -X PUT http://127.0.0.1:8787/tasks/demo/jobs/report-1 \
+  -H 'content-type: application/json' \
+  -d '{"text":"準備報告","policy":"transient-only","requireApproval":true}'
+curl http://127.0.0.1:8787/tasks/demo/jobs/report-1
+curl -X POST http://127.0.0.1:8787/tasks/demo/jobs/report-1/approve
+```
+
+新工作只在確認 Workflow 存在且持久補查已建立後回覆 `202`；已結案的相同工作則回傳保存的終態收據。相同 owner/key 與相同內容回到同一個工作；換內容重用 key 回 `409`。逾時或 `503` 代表接受結果未確認，請使用原 key 重送。`DELETE` 同一路徑要求取消；成功、失敗、取消都是不可逆的終態。完成與取消同時發生時，以已確認並保存的終態為準；取消不會撤銷已發生的外部效果。
+
+`transient-only` 只重試 provider adapter 明確標記 `retryable: true` 的執行失敗。`regenerate` 另外允許輸出驗證失敗後重新生成；它適合可重做的內容生成，不應直接套在付款或寄信。範例兩者最多重試兩次，每次 Action 有 25 秒預算，Workflow 步驟有 30 秒上限；人工確認最多等 24 小時，整個工作期限為 25 小時，由 60 秒持久補查協助結案。平台服務中斷會延後進度，這些期限不是 SLA。
+
+修改產品時，改寫版本化的工作與策略，以及 `composeTask` provider adapter。每個步驟有穩定的 provider idempotency key；adapter 必須實際使用它，並針對未知副作用結果設計查核／補償。已完成的步驟由 Workflows 保存，未完成的步驟仍可能重做。終態副本保留在 Agent SQLite，不依賴 Workflow 執行紀錄的保留期限；範例未提供收據清理，正式產品需自訂保留與去重期限。新增版本時保留舊 Workflow 與步驟契約，勿直接改寫仍在執行的工作。
+
+要驗證整個本機服務重啟，先執行 `npm run smoke:tasks -- accept`，停止並重新啟動使用同一 `--persist-to` 的 dev，再執行 `npm run smoke:tasks -- resume`。此測試只連 localhost。
+
+## 改寫保留的聊天範例
 
 1. 改寫 `src/example/chat.ts` 的 state、actions 與 `cmd` transition function。
 2. 把 `src/index.ts` 的 echo `ModelClient` 換成你的 provider binding。
@@ -86,13 +108,14 @@ npm run build
 
 | 需求 | 優先選擇 |
 | --- | --- |
+| 接受長任務後追蹤到終態、人工確認與可替換策略 | 本模板的 TaskAgent + Workflows |
 | 明確領域狀態、過期結果守衛、可獨立測試的決策 | 本模板 |
 | 一般有狀態聊天、排程或內建聊天 UI 整合 | 直接用 Agents SDK / AIChatAgent |
 | agent 內部需要 checkpoint 的中斷工作 | SDK `runFiber` / `stash`，恢復邏輯仍由你定義 |
 | 具持久步驟、重試、長時間等待的獨立多步驟任務 | Workflows |
 | 無狀態請求處理 | 一般 Worker |
 
-模板只示範一個有守衛的 request/response 回合，不提供通用 supervisor、tool loop、replay engine、outbox、schema migration 系統或 exactly-once effects。`runQuery` 只是模板內的唯讀慣例，無法強迫外部 provider 保持唯讀。
+模板示範持久長任務與有守衛的 request/response 回合，不提供通用 supervisor、tool loop、跨系統 outbox、schema migration 系統或 exactly-once effects。`runQuery` 只是聊天範例內的唯讀慣例，無法強迫外部 provider 保持唯讀。新的 task HTTP 路由同樣沒有身分驗證或 owner 授權；正式開放前必須補上這些控制與配額。
 
 較長的 durable process 應依需求使用專用平台能力，例如 [Agents durable execution](https://developers.cloudflare.com/agents/runtime/execution/durable-execution/) 或 [Cloudflare Workflows](https://developers.cloudflare.com/workflows/)。本實作的詳細契約與失敗語意見 [NOTES.zh-TW.md](./NOTES.zh-TW.md)。
 

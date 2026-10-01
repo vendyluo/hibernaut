@@ -4,6 +4,56 @@ Prepared 2026-09-12. Nothing has been pushed, released, deployed, renamed remote
 published to npm, or posted externally by this work. GitHub already reports the
 repository as public and `isTemplate: true`.
 
+## Long-task agent verification — 2026-10-01
+
+The local working tree is based on upgrade commit `5349779`. That upgrade was
+pushed and its [GitHub Actions run](https://github.com/vendyluo/hibernaut/actions/runs/36830464723)
+passed. The long-task evidence below was collected before committing or pushing
+these changes; it does not establish remote CI or deployment results.
+
+The primary example now pairs TaskAgent's retained receipts with Workflows'
+durable execution. New jobs are acknowledged only after a recovery watcher is
+armed and their Workflow is confirmed. Immutable request identity, same-key
+retries, terminal publication/reconciliation, persisted cancellation/deadline
+intent and two replaceable retry policies have explicit contracts in the
+bilingual README and architecture notes. The existing guarded chat remains.
+`v2` adds TaskAgent as a new SQLite class; `hibernaut-task-v1` is a new Workflow
+binding. No existing ChatAgent data migration or SDK upgrade was performed.
+
+Verified on macOS arm64, Node **24.21.0**, npm **11.19.0**, with the pinned
+Wrangler **4.131.1**, Agents **0.20.1** and Effect **4.0.0**:
+
+- `npm run types`: generated both agent namespaces and the Workflow binding.
+- `npm run check` and `npm run typecheck`: pass without lint warnings.
+- Final `npm test`: **79 pass** (37 core, 42 workerd). The 11 new Workflow tests
+  exercise real HTTP submission, concurrent deduplication, request conflicts,
+  agent eviction, approval, cancellation/late results, exhausted retries,
+  expired approval waits, and alarm recovery of interrupted acceptance,
+  missing terminal publication and persisted deadline termination. An injected
+  watcher failure confirms that submission cannot acknowledge acceptance and
+  the same key can recover. Workflow retry/expiry fault cases use the pool's
+  introspector; these are not 24-hour wall-clock soak tests.
+- Final `npm run build`: dry run succeeds, **2847.67 KiB raw / 535.37 KiB gzip**,
+  with ChatAgent, TaskAgent and TaskWorkflow bindings; no upload occurred.
+- `npm run smoke:tasks -- accept /private/tmp/hibernaut-task-smoke-20261001.json`,
+  stop Wrangler, restart against the same isolated
+  `/private/tmp/hibernaut-tasks-20261001` persistence directory, then
+  `npm run smoke:tasks -- resume /private/tmp/hibernaut-task-smoke-20261001.json`:
+  the same Workflow ID survived the full process restart, remained queryable,
+  deduped submission, accepted approval and retained its terminal output.
+- Final `npm run smoke:tasks` and the unchanged `npm run smoke`: pass.
+- `git diff --check`: pass. Local dev processes were stopped after verification.
+
+Non-fatal SDK sourcemap warnings remain. The local Workflow runtime also logs
+intentional failure/termination cases during tests; all test commands exit 0.
+This evidence does not validate production scheduling/availability, real
+provider side effects, authentication, owner authorization, quotas or receipt
+retention policy. The provider is deterministic echo. Adapters must use the
+supplied idempotency key or implement reconciliation/compensation; the template
+does not promise exactly-once effects. Deadline/reconciliation cadence is
+product policy, not an SLA. No Cloudflare authentication or shared-system
+migration/deployment was performed.
+
 ## Toolchain upgrade verification — 2026-10-01
 
 The current local tree is based on `main` commit `3831547`, fast-forwarded from
