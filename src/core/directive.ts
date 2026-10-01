@@ -81,12 +81,7 @@ export interface Stop {
   readonly _tag: "Stop";
 }
 
-export type Directive<A> =
-  | Emit
-  | ScheduleAction<A>
-  | RunInstruction
-  | Fail
-  | Stop;
+export type Directive<A> = Emit | ScheduleAction<A> | RunInstruction | Fail | Stop;
 
 /** `RunInstruction` 執行完之後，送回 `cmd` 的結果形狀。 */
 export type Outcome =
@@ -96,27 +91,26 @@ export type Outcome =
 export const emit = (event: string, payload: unknown): Emit => ({
   _tag: "Emit",
   event,
-  payload
+  payload,
 });
 
-export const scheduleAction = <A>(
-  delaySeconds: number,
-  action: A
-): ScheduleAction<A> => ({ _tag: "ScheduleAction", delaySeconds, action });
+export const scheduleAction = <A>(delaySeconds: number, action: A): ScheduleAction<A> => ({
+  _tag: "ScheduleAction",
+  delaySeconds,
+  action,
+});
 
 export const runInstruction = (
   action: string,
   params: unknown,
   resultAction: string,
-  meta?: Readonly<Record<string, unknown>>
+  meta?: Readonly<Record<string, unknown>>,
 ): RunInstruction =>
   meta === undefined
     ? { _tag: "RunInstruction", action, params, resultAction }
     : { _tag: "RunInstruction", action, params, resultAction, meta };
 
 export const fail = (reason: string, detail?: unknown): Fail =>
-  detail === undefined
-    ? { _tag: "Fail", reason }
-    : { _tag: "Fail", reason, detail };
+  detail === undefined ? { _tag: "Fail", reason } : { _tag: "Fail", reason, detail };
 
 export const stop = (): Stop => ({ _tag: "Stop" });

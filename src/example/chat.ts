@@ -30,12 +30,7 @@
 import { Context, Effect, Schema } from "effect";
 import { defineAction, type ActionError } from "../core/action.js";
 import { defineAgent, only, type CmdResult } from "../core/agent.js";
-import {
-  emit,
-  runInstruction,
-  scheduleAction,
-  type Outcome
-} from "../core/directive.js";
+import { emit, runInstruction, scheduleAction, type Outcome } from "../core/directive.js";
 import { guardDeadline, nextRequest, reconcileTurn } from "../core/turn.js";
 
 // ---------------------------------------------------------------------------
@@ -53,41 +48,39 @@ const MODEL_TIMEOUT_SECONDS = 60;
 // 狀態
 // ---------------------------------------------------------------------------
 
-const MessageText = Schema.String.pipe(Schema.maxLength(MAX_MESSAGE_CHARS));
+const MessageText = Schema.String.check(Schema.isMaxLength(MAX_MESSAGE_CHARS));
 
 const Message = Schema.Struct({
-  role: Schema.Literal("user", "assistant"),
-  text: MessageText
+  role: Schema.Literals(["user", "assistant"]),
+  text: MessageText,
 });
-export type Message = Schema.Schema.Type<typeof Message>;
+export type Message = typeof Message.Type;
 
-const Phase = Schema.Union(
+const Phase = Schema.Union([
   Schema.Struct({ _tag: Schema.Literal("Idle") }),
   Schema.Struct({
     _tag: Schema.Literal("AwaitingModel"),
     requestId: Schema.String,
     /** 守衛應該在什麼時候到期（epoch ms）。修復時只靠這個，不靠排程表。 */
-    deadlineAt: Schema.Number
-  })
-);
+    deadlineAt: Schema.Number,
+  }),
+]);
 
 export const ChatState = Schema.Struct({
-  messages: Schema.Array(Message).pipe(
-    Schema.maxItems(MAX_HISTORY_MESSAGES)
-  ),
+  messages: Schema.Array(Message).check(Schema.isMaxLength(MAX_HISTORY_MESSAGES)),
   phase: Phase,
   /** 單調遞增。同時當作 requestId 的來源 —— 純的、可重放的。 */
-  seq: Schema.Number.pipe(
-    Schema.int(),
-    Schema.between(0, Number.MAX_SAFE_INTEGER)
-  )
+  seq: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  ),
 });
-export type ChatState = Schema.Schema.Type<typeof ChatState>;
+export type ChatState = typeof ChatState.Type;
 
 export const initialChatState: ChatState = {
   messages: [],
   phase: { _tag: "Idle" },
-  seq: 0
+  seq: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -121,23 +114,17 @@ const truncate = (text: string): string => {
 };
 
 /** 追加並裁掉最舊的，維持 schema 的 maxItems 不變式。 */
-const append = (
-  messages: ReadonlyArray<Message>,
-  message: Message
-): ReadonlyArray<Message> =>
+const append = (messages: ReadonlyArray<Message>, message: Message): ReadonlyArray<Message> =>
   [...messages, message].slice(-MAX_HISTORY_MESSAGES);
 
-const cmd = (
-  state: ChatState,
-  action: ChatAction
-): CmdResult<ChatState, ChatAction> => {
+const cmd = (state: ChatState, action: ChatAction): CmdResult<ChatState, ChatAction> => {
   switch (action._tag) {
     case "UserMessage": {
       // (3) 忙碌時明確拒絕。DO 不會幫你公平調度。
       if (state.phase._tag === "AwaitingModel") {
         return {
           state,
-          directives: [emit("busy", { reason: "awaiting model response" })]
+          directives: [emit("busy", { reason: "awaiting model response" })],
         };
       }
 
@@ -145,13 +132,13 @@ const cmd = (
       if (request === null) {
         return {
           state,
-          directives: [emit("error", { message: "request sequence exhausted" })]
+          directives: [emit("error", { message: "request sequence exhausted" })],
         };
       }
       const { seq, requestId } = request;
       const messages = append(state.messages, {
         role: "user",
-        text: truncate(action.text)
+        text: truncate(action.text),
       });
 
       return {
@@ -161,19 +148,19 @@ const cmd = (
           phase: {
             _tag: "AwaitingModel",
             requestId,
-            deadlineAt: guardDeadline(action.now, MODEL_TIMEOUT_SECONDS)
+            deadlineAt: guardDeadline(action.now, MODEL_TIMEOUT_SECONDS),
           },
-          seq
+          seq,
         },
         directives: [
           // (2) 逾時守衛。成功時它照樣會來，然後被忽略。
           scheduleAction(MODEL_TIMEOUT_SECONDS, {
             _tag: "ModelTimeout",
-            requestId
+            requestId,
           } as const),
           // 呼叫模型：狀態已經記下「我在等 requestId」，之後被驅逐也接得回來。
-          runInstruction("callModel", { messages }, "ModelResult", { requestId })
-        ]
+          runInstruction("callModel", { messages }, "ModelResult", { requestId }),
+        ],
       };
     }
 
@@ -184,7 +171,7 @@ const cmd = (
       if (action.outcome._tag === "Err") {
         return {
           state: { ...state, phase: { _tag: "Idle" } },
-          directives: [emit("error", { message: action.outcome.message })]
+          directives: [emit("error", { message: action.outcome.message })],
         };
       }
 
@@ -192,7 +179,7 @@ const cmd = (
       if (text === null) {
         return {
           state: { ...state, phase: { _tag: "Idle" } },
-          directives: [emit("error", { message: "malformed model output" })]
+          directives: [emit("error", { message: "malformed model output" })],
         };
       }
 
@@ -200,9 +187,9 @@ const cmd = (
         state: {
           ...state,
           messages: append(state.messages, { role: "assistant", text }),
-          phase: { _tag: "Idle" }
+          phase: { _tag: "Idle" },
         },
-        directives: [emit("message", { role: "assistant", text })]
+        directives: [emit("message", { role: "assistant", text })],
       };
     }
 
@@ -211,7 +198,7 @@ const cmd = (
       if (!isAwaiting(state, action.requestId)) return only(state);
       return {
         state: { ...state, phase: { _tag: "Idle" } },
-        directives: [emit("error", { message: "model timed out" })]
+        directives: [emit("error", { message: "model timed out" })],
       };
     }
 
@@ -223,9 +210,9 @@ const cmd = (
         directives: [
           scheduleAction(action.remainingSeconds, {
             _tag: "ModelTimeout",
-            requestId: action.requestId
-          } as const)
-        ]
+            requestId: action.requestId,
+          } as const),
+        ],
       };
     }
   }
@@ -251,14 +238,14 @@ const reconcile = (state: ChatState, now: number): ChatAction | null =>
     (requestId, remainingSeconds) => ({
       _tag: "RearmGuard",
       requestId,
-      remainingSeconds
-    })
+      remainingSeconds,
+    }),
   );
 
 /** 會被 `ScheduleAction` 排進排程表的 action 子集 —— 醒來時由 shell 驗證。 */
 const ScheduledChatAction = Schema.Struct({
   _tag: Schema.Literal("ModelTimeout"),
-  requestId: Schema.String
+  requestId: Schema.String,
 });
 
 export const chatAgent = defineAgent<ChatState, ChatAction>({
@@ -267,21 +254,19 @@ export const chatAgent = defineAgent<ChatState, ChatAction>({
   initialState: initialChatState,
   cmd,
   reconcile,
-  scheduledAction: ScheduledChatAction
+  scheduledAction: ScheduledChatAction,
 });
 
 // ---------------------------------------------------------------------------
 // Action 實作（唯一允許出現 I/O 與 Effect 的地方）
 // ---------------------------------------------------------------------------
 
-export class ModelClient extends Context.Tag("ModelClient")<
+export class ModelClient extends Context.Service<
   ModelClient,
   {
-    readonly complete: (
-      messages: ReadonlyArray<Message>
-    ) => Effect.Effect<string, ActionError>;
+    readonly complete: (messages: ReadonlyArray<Message>) => Effect.Effect<string, ActionError>;
   }
->() {}
+>()("ModelClient") {}
 
 export const callModel = defineAction({
   name: "callModel",
@@ -293,8 +278,8 @@ export const callModel = defineAction({
   run: ({ messages }) =>
     ModelClient.pipe(
       Effect.flatMap((client) => client.complete(messages)),
-      Effect.map((text) => ({ text }))
-    )
+      Effect.map((text) => ({ text })),
+    ),
 });
 
 export const chatActions = { callModel };

@@ -61,7 +61,7 @@ Await points permit interleaving, so the explicit busy rejection prevents overla
 
 Persisted state and scheduled payloads are schema-validated on activation/callback. Invalid state is quarantined without silent reset; invalid scheduled payloads are dropped and reported. The implementation has bounds on input and retained history, but no general schema migration mechanism.
 
-These boundaries use `Schema.validateEither`: stored values must already satisfy the schema's decoded **Type** side and be JSON-compatible. The shell does not call schema encoders or apply transformations on recovery. For example, `NumberFromString` requires a stored number, not a numeric string; `Trim` rejects untrimmed scheduled IDs rather than changing their identity. Action inputs are different: `runAction` explicitly decodes them before execution. Schema changes requiring migration need a separate, deliberate data-migration procedure.
+These boundaries use `Schema.decodeUnknownResult(Schema.toType(schema))`: stored values must already satisfy the schema's decoded **Type** side and be JSON-compatible. The shell does not call schema encoders or apply transformations on recovery. For example, `NumberFromString` requires a stored number, not a numeric string; `Trim` rejects untrimmed scheduled IDs rather than changing their identity. Action inputs are different: `runAction` explicitly decodes them before execution. Schema changes requiring migration need a separate, deliberate data-migration procedure.
 
 ## Security and intended use
 

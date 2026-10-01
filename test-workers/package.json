@@ -1,0 +1,14 @@
+{
+  "name": "@hibernaut/worker-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@vitest/browser-preview": "4.1.11",
+    "@vitest/ui": "4.1.11",
+    "vitest": "4.1.11"
+  }
+}

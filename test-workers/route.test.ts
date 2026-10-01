@@ -14,7 +14,7 @@ const AGENT_URL = "https://example.com/agents/chat-agent";
 /** 建立連線並回傳一個「收下一則訊息」的函式。 */
 const connect = async (room: string) => {
   const response = await SELF.fetch(`${AGENT_URL}/${room}`, {
-    headers: { Upgrade: "websocket" }
+    headers: { Upgrade: "websocket" },
   });
 
   expect(response.status).toBe(101);
@@ -43,7 +43,7 @@ const connect = async (room: string) => {
 /** 過濾掉 Agents SDK 自己的狀態同步訊息，只留 agent 送出的事件。 */
 const nextEvent = async (
   next: () => Promise<string>,
-  types: ReadonlyArray<string>
+  types: ReadonlyArray<string>,
 ): Promise<{ type: string; payload: Record<string, unknown> }> => {
   for (let i = 0; i < 10; i++) {
     const parsed = JSON.parse(await next()) as {
@@ -72,10 +72,12 @@ describe("Worker 入口路由", () => {
 
   it("SDK state frames cannot overwrite server-owned state; text still works", async () => {
     const { ws, next } = await connect("route-server-state");
-    ws.send(JSON.stringify({
-      type: "cf_agent_state",
-      state: { messages: [], phase: { _tag: "Idle" }, seq: 999 }
-    }));
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_state",
+        state: { messages: [], phase: { _tag: "Idle" }, seq: 999 },
+      }),
+    );
     const rejected = await nextEvent(next, ["cf_agent_state_error"]);
     expect(rejected.type).toBe("cf_agent_state_error");
     ws.send("after rejected write");
@@ -94,8 +96,9 @@ describe("Worker 入口路由", () => {
     await evictDurableObject(stub);
     ws.send("after");
     expect((await nextEvent(next, ["message"])).payload.text).toBe("echo: after");
-    expect(await runInDurableObject(stub, (instance) => instance.state.messages.map((m) => m.text)))
-      .toEqual(["before", "echo: before", "after", "echo: after"]);
+    expect(
+      await runInDurableObject(stub, (instance) => instance.state.messages.map((m) => m.text)),
+    ).toEqual(["before", "echo: before", "after", "echo: after"]);
     ws.close();
   });
 

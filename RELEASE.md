@@ -4,6 +4,68 @@ Prepared 2026-09-12. Nothing has been pushed, released, deployed, renamed remote
 published to npm, or posted externally by this work. GitHub already reports the
 repository as public and `isTemplate: true`.
 
+## Toolchain upgrade verification — 2026-10-01
+
+The current local tree is based on `main` commit `3831547`, fast-forwarded from
+`328782e`, with Vite+ **1.0.0** and Effect **4.0.0**. The older Linux evidence below
+is historical and does not verify this upgrade. The evidence below was collected
+before committing or pushing this update; it does not establish remote CI or
+deployment results.
+
+Verified on macOS arm64, Node **24.21.0**, npm **11.19.0**:
+
+- `npm ci`: clean install succeeds; full audit reports **0** vulnerabilities.
+- `npm ls vitest @vitest/runner @vitest/snapshot @vitest/ui @vitest/browser-preview`:
+  succeeds without invalid peers. Core uses Vite+'s Vitest **5.0.1**; the
+  `test-workers` workspace uses Vitest **4.1.11**, required by Cloudflare pool
+  **0.22.0**. Trying that pool under Vitest 5 failed worker startup; do not force
+  one global Vitest version. Optional UI/browser peers are pinned within the
+  worker workspace to keep npm's peer graph valid; no browser tests were added.
+- `npm run check` and `npm run typecheck`: pass.
+- `npm test`: **64 pass** (33 core, 31 workerd). Six new Action tests cover
+  input decoding, Type-side output validation, rejected input/output, retry
+  success/exhaustion, and the timeout across retry backoff. Existing persisted
+  state and scheduled-payload transformation regressions also pass under v4.
+- `npm run types` then `git diff --exit-code -- worker-configuration.d.ts`: pass,
+  generated bindings unchanged.
+- `npm run build`: dry run succeeds, **2832.16 KiB raw / 531.75 KiB gzip**.
+- Local `npm run dev` plus `npm run smoke`: WebSocket echo, server state,
+  rejected client overwrite, and clean close pass. The dev process was stopped.
+
+Effect v4 uses `Context.Service`, Schema checks and Type projections, `Result`,
+and `Effect.timeoutOrElse`; recovery still validates the Type representation
+without transforming stored values or scheduled IDs. Wrangler still owns the
+Worker dev/build path. The `undici: 7.29.1` patch override resolves the existing
+Cloudflare toolchain advisories that otherwise fail the CI audit; retain the
+previous sharp override. No SDK upgrade or persisted-data migration was made.
+Upstream SDK sourcemap warnings remain non-fatal; npm reports existing dependency
+install scripts not covered by its allowScripts policy. Runtime tests and smoke
+verify the installed tools here, but do not establish remote CI or production
+behavior.
+
+## cf and Vitest follow-up — 2026-10-01
+
+The [durable trial record](./verification/cf-trial.md) preserves the isolated
+`cf@1.0.0-beta.10` experiment, tested configuration, failure cases and limits.
+The repository still uses Wrangler; cf and its experimental configuration have
+not been applied here.
+
+- The current root test workspace blocks cf application detection. Including
+  the root as a workspace instead produced a multiple-framework detection error.
+- A diagnostic copy without the workspace declaration passed cf build, dry-run,
+  generated-type checking and final WebSocket smoke, using Wrangler 4.145.0 as
+  delegate. Its 64 tests passed, but the workerd suite still used wrangler.jsonc.
+  The control layout's clean install was not validated, and config reload ended
+  a dev session with an unexplained error; restarting the final config passed.
+- The newest Cloudflare pool (0.22.0) and renamed plugin (1.3.4) still declare
+  Vitest `^4.1.0` peers. Workers already use the latest v4, 4.1.11. Core remains on
+  Vite+'s bundled 5.0.1; upstream Vitest latest 5.0.3 was checked, not installed.
+  The forced older-pool/v5 trial failed startup; the newer plugin was not tested.
+
+Retain the current verified toolchain until a supported layout and runner
+combination can pass clean installation and the same local checks. No remote CI,
+namespace migration, upload, deployment or Vite bundler trial was performed.
+
 ## Version source and maintenance location
 
 The old local `cfa` history and GitHub `main` have no common ancestor. They must

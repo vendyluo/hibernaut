@@ -6,13 +6,13 @@
  * 這正是 Jido 把 Action / Agent 跟 AgentServer 切開之後拿到的東西 ——
  * 「不用起 process 就能測」在這裡變成「不用起 Durable Object 就能測」。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   chatAgent,
   initialChatState,
   MAX_HISTORY_MESSAGES,
   MAX_MESSAGE_CHARS,
-  type ChatState
+  type ChatState,
 } from "../src/example/chat.js";
 
 const { cmd, reconcile } = chatAgent;
@@ -24,7 +24,7 @@ const TIMEOUT_MS = 60_000;
 const awaiting = (requestId: string, deadlineAt = T0 + TIMEOUT_MS): ChatState => ({
   ...initialChatState,
   phase: { _tag: "AwaitingModel", requestId, deadlineAt },
-  seq: 1
+  seq: 1,
 });
 
 describe("chat agent cmd — 純決策", () => {
@@ -32,21 +32,18 @@ describe("chat agent cmd — 純決策", () => {
     const { state, directives } = cmd(initialChatState, {
       _tag: "UserMessage",
       text: "hi",
-      now: T0
+      now: T0,
     });
 
     expect(state.phase).toEqual({
       _tag: "AwaitingModel",
       requestId: "req-1",
-      deadlineAt: T0 + TIMEOUT_MS
+      deadlineAt: T0 + TIMEOUT_MS,
     });
     expect(state.messages).toEqual([{ role: "user", text: "hi" }]);
 
     // 順序有意義：守衛必須先於呼叫。
-    expect(directives.map((d) => d._tag)).toEqual([
-      "ScheduleAction",
-      "RunInstruction"
-    ]);
+    expect(directives.map((d) => d._tag)).toEqual(["ScheduleAction", "RunInstruction"]);
   });
 
   it("忙碌時拒絕新訊息，而不是讓 mailbox 長大", () => {
@@ -54,12 +51,12 @@ describe("chat agent cmd — 純決策", () => {
     const { state, directives } = cmd(busy, {
       _tag: "UserMessage",
       text: "again",
-      now: T0
+      now: T0,
     });
 
     expect(state).toBe(busy);
     expect(directives).toEqual([
-      { _tag: "Emit", event: "busy", payload: { reason: "awaiting model response" } }
+      { _tag: "Emit", event: "busy", payload: { reason: "awaiting model response" } },
     ]);
   });
 
@@ -68,7 +65,7 @@ describe("chat agent cmd — 純決策", () => {
     const { state, directives } = cmd(waiting, {
       _tag: "ModelResult",
       requestId: "req-1", // 上一輪的殘留
-      outcome: { _tag: "Ok", value: { text: "stale" } }
+      outcome: { _tag: "Ok", value: { text: "stale" } },
     });
 
     expect(state).toBe(waiting);
@@ -78,12 +75,12 @@ describe("chat agent cmd — 純決策", () => {
   it("重複送達同一個 ModelResult 是安全的", () => {
     const waiting: ChatState = {
       ...awaiting("req-1"),
-      messages: [{ role: "user", text: "hi" }]
+      messages: [{ role: "user", text: "hi" }],
     };
     const action = {
       _tag: "ModelResult",
       requestId: "req-1",
-      outcome: { _tag: "Ok", value: { text: "hello" } }
+      outcome: { _tag: "Ok", value: { text: "hello" } },
     } as const;
 
     const first = cmd(waiting, action);
@@ -98,7 +95,7 @@ describe("chat agent cmd — 純決策", () => {
     const idle: ChatState = { ...initialChatState, seq: 1 };
     const { state, directives } = cmd(idle, {
       _tag: "ModelTimeout",
-      requestId: "req-1"
+      requestId: "req-1",
     });
 
     expect(state).toBe(idle);
@@ -107,22 +104,30 @@ describe("chat agent cmd — 純決策", () => {
 
   it("timed-out result and timeout duplicates cannot change a newer turn", () => {
     const expired = cmd(awaiting("req-1"), { _tag: "ModelTimeout", requestId: "req-1" });
-    const newer = cmd(expired.state, { _tag: "UserMessage", text: "new", now: T0 + TIMEOUT_MS }).state;
+    const newer = cmd(expired.state, {
+      _tag: "UserMessage",
+      text: "new",
+      now: T0 + TIMEOUT_MS,
+    }).state;
     expect(newer.phase).toMatchObject({ _tag: "AwaitingModel", requestId: "req-2" });
     const late = cmd(newer, {
-      _tag: "ModelResult", requestId: "req-1",
-      outcome: { _tag: "Ok", value: { text: "old answer" } }
+      _tag: "ModelResult",
+      requestId: "req-1",
+      outcome: { _tag: "Ok", value: { text: "old answer" } },
     });
     expect(late).toEqual({ state: newer, directives: [] });
-    expect(cmd(late.state, { _tag: "ModelTimeout", requestId: "req-1" }))
-      .toEqual({ state: newer, directives: [] });
+    expect(cmd(late.state, { _tag: "ModelTimeout", requestId: "req-1" })).toEqual({
+      state: newer,
+      directives: [],
+    });
   });
 
   it("deadline is a recovery target, not strict output expiry before timeout is processed", () => {
     const pastDeadline = awaiting("req-1", T0 - 1);
     const result = cmd(pastDeadline, {
-      _tag: "ModelResult", requestId: "req-1",
-      outcome: { _tag: "Ok", value: { text: "first processed wins" } }
+      _tag: "ModelResult",
+      requestId: "req-1",
+      outcome: { _tag: "Ok", value: { text: "first processed wins" } },
     });
     expect(result.state.phase).toEqual({ _tag: "Idle" });
     expect(result.state.messages).toEqual([{ role: "assistant", text: "first processed wins" }]);
@@ -131,12 +136,12 @@ describe("chat agent cmd — 純決策", () => {
   it("真的逾時才把 agent 拉回 Idle 並回報", () => {
     const { state, directives } = cmd(awaiting("req-1"), {
       _tag: "ModelTimeout",
-      requestId: "req-1"
+      requestId: "req-1",
     });
 
     expect(state.phase).toEqual({ _tag: "Idle" });
     expect(directives).toEqual([
-      { _tag: "Emit", event: "error", payload: { message: "model timed out" } }
+      { _tag: "Emit", event: "error", payload: { message: "model timed out" } },
     ]);
   });
 
@@ -148,18 +153,18 @@ describe("chat agent cmd — 純決策", () => {
   it("序號用盡時拒絕新請求，不產生重複 requestId", () => {
     const exhausted: ChatState = {
       ...initialChatState,
-      seq: Number.MAX_SAFE_INTEGER
+      seq: Number.MAX_SAFE_INTEGER,
     };
 
     const { state, directives } = cmd(exhausted, {
       _tag: "UserMessage",
       text: "hi",
-      now: T0
+      now: T0,
     });
 
     expect(state).toBe(exhausted);
     expect(directives).toEqual([
-      { _tag: "Emit", event: "error", payload: { message: "request sequence exhausted" } }
+      { _tag: "Emit", event: "error", payload: { message: "request sequence exhausted" } },
     ]);
   });
 });
@@ -174,7 +179,7 @@ describe("reconcile — 排程可能沒寫成功時的自我修復", () => {
     expect(repair).toEqual({
       _tag: "RearmGuard",
       requestId: "req-1",
-      remainingSeconds: 30
+      remainingSeconds: 30,
     });
   });
 
@@ -188,7 +193,7 @@ describe("reconcile — 排程可能沒寫成功時的自我修復", () => {
     const { state, directives } = cmd(waiting, {
       _tag: "RearmGuard",
       requestId: "req-1",
-      remainingSeconds: 30
+      remainingSeconds: 30,
     });
 
     expect(state).toBe(waiting);
@@ -196,8 +201,8 @@ describe("reconcile — 排程可能沒寫成功時的自我修復", () => {
       {
         _tag: "ScheduleAction",
         delaySeconds: 30,
-        action: { _tag: "ModelTimeout", requestId: "req-1" }
-      }
+        action: { _tag: "ModelTimeout", requestId: "req-1" },
+      },
     ]);
   });
 
@@ -206,7 +211,7 @@ describe("reconcile — 排程可能沒寫成功時的自我修復", () => {
     const { state, directives } = cmd(waiting, {
       _tag: "RearmGuard",
       requestId: "req-1",
-      remainingSeconds: 30
+      remainingSeconds: 30,
     });
 
     expect(state).toBe(waiting);
@@ -228,7 +233,7 @@ describe("容量上限 — 持久狀態不能無界成長", () => {
     const { state } = cmd(initialChatState, {
       _tag: "UserMessage",
       text: "x".repeat(MAX_MESSAGE_CHARS * 2),
-      now: T0
+      now: T0,
     });
 
     expect(state.messages[0]!.text).toHaveLength(MAX_MESSAGE_CHARS);
@@ -238,7 +243,7 @@ describe("容量上限 — 持久狀態不能無界成長", () => {
     const { state } = cmd(awaiting("req-1"), {
       _tag: "ModelResult",
       requestId: "req-1",
-      outcome: { _tag: "Ok", value: { text: "y".repeat(MAX_MESSAGE_CHARS * 2) } }
+      outcome: { _tag: "Ok", value: { text: "y".repeat(MAX_MESSAGE_CHARS * 2) } },
     });
 
     expect(state.messages.at(-1)!.text).toHaveLength(MAX_MESSAGE_CHARS);
@@ -250,8 +255,8 @@ describe("容量上限 — 持久狀態不能無界成長", () => {
       requestId: "req-1",
       outcome: {
         _tag: "Ok",
-        value: { text: `${"a".repeat(MAX_MESSAGE_CHARS - 1)}😀` }
-      }
+        value: { text: `${"a".repeat(MAX_MESSAGE_CHARS - 1)}😀` },
+      },
     });
 
     const text = state.messages.at(-1)!.text;
@@ -266,19 +271,17 @@ describe("容量上限 — 持久狀態不能無界成長", () => {
       state = cmd(state, {
         _tag: "UserMessage",
         text: `msg-${i}`,
-        now: T0 + i
+        now: T0 + i,
       }).state;
       state = cmd(state, {
         _tag: "ModelResult",
         requestId: `req-${i + 1}`,
-        outcome: { _tag: "Ok", value: { text: `reply-${i}` } }
+        outcome: { _tag: "Ok", value: { text: `reply-${i}` } },
       }).state;
     }
 
     expect(state.messages).toHaveLength(MAX_HISTORY_MESSAGES);
     // 保留的是最新的，不是最舊的。
-    expect(state.messages.at(-1)!.text).toBe(
-      `reply-${MAX_HISTORY_MESSAGES * 2 - 1}`
-    );
+    expect(state.messages.at(-1)!.text).toBe(`reply-${MAX_HISTORY_MESSAGES * 2 - 1}`);
   });
 });

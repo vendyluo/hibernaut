@@ -11,7 +11,7 @@ import {
   MAX_MESSAGE_CHARS,
   ModelClient,
   type ChatAction,
-  type ChatState
+  type ChatState,
 } from "./example/chat.js";
 import { DirectiveAgent } from "./runtime/shell.js";
 
@@ -22,21 +22,14 @@ import { DirectiveAgent } from "./runtime/shell.js";
 const ModelClientLive = Layer.succeed(ModelClient, {
   complete: (messages) =>
     messages.length === 0
-      ? Effect.fail(
-          new ActionError({ action: "callModel", message: "empty conversation" })
-        )
-      : Effect.succeed(`echo: ${messages[messages.length - 1]?.text ?? ""}`)
+      ? Effect.fail(new ActionError({ action: "callModel", message: "empty conversation" }))
+      : Effect.succeed(`echo: ${messages[messages.length - 1]?.text ?? ""}`),
 });
 
 /** 單則訊息的 UTF-8 byte 上限。字元數上限由 schema 保證（bytes >= chars）。 */
 const MAX_MESSAGE_BYTES = MAX_MESSAGE_CHARS;
 
-export class ChatAgent extends DirectiveAgent<
-  Cloudflare.Env,
-  ChatState,
-  ChatAction,
-  ModelClient
-> {
+export class ChatAgent extends DirectiveAgent<Cloudflare.Env, ChatState, ChatAction, ModelClient> {
   initialState = initialChatState;
 
   protected readonly def = chatAgent;
@@ -59,9 +52,6 @@ export class ChatAgent extends DirectiveAgent<
 
 export default {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
-    return (
-      (await routeAgentRequest(request, env)) ??
-      new Response("Not found", { status: 404 })
-    );
-  }
+    return (await routeAgentRequest(request, env)) ?? new Response("Not found", { status: 404 });
+  },
 };

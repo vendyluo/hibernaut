@@ -2,7 +2,7 @@
  * 回合守衛工具組 —— 純函式，零平台。
  * 行為面的驗證在 chat 的 reconcile 測試裡；這裡釘邊界條件。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { guardDeadline, nextRequest, reconcileTurn } from "../src/core/turn.js";
 
 describe("nextRequest", () => {
@@ -27,7 +27,7 @@ describe("reconcileTurn", () => {
   const rearm = (requestId: string, remainingSeconds: number) => ({
     kind: "rearm",
     requestId,
-    remainingSeconds
+    remainingSeconds,
   });
 
   it("不在 Busy → 不用修", () => {
@@ -38,7 +38,7 @@ describe("reconcileTurn", () => {
     const guard = { requestId: "req-1", deadlineAt: 1_000 };
     expect(reconcileTurn(guard, 1_000, expired, rearm)).toEqual({
       kind: "expired",
-      requestId: "req-1"
+      requestId: "req-1",
     });
   });
 
@@ -47,7 +47,7 @@ describe("reconcileTurn", () => {
     expect(reconcileTurn(guard, 9_000, expired, rearm)).toEqual({
       kind: "rearm",
       requestId: "req-2",
-      remainingSeconds: 2
+      remainingSeconds: 2,
     });
   });
 
@@ -56,7 +56,7 @@ describe("reconcileTurn", () => {
     expect(reconcileTurn(guard, 1_099, expired, rearm)).toEqual({
       kind: "rearm",
       requestId: "req-3",
-      remainingSeconds: 1
+      remainingSeconds: 1,
     });
   });
 });

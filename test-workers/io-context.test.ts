@@ -17,7 +17,7 @@ const stubFor = (name: string) => env.ChatAgent.get(env.ChatAgent.idFromName(nam
 describe("跨 handler 的 fiber", () => {
   it("後續 handler 等待的 fiber 仍能存取同一 DO storage", async () => {
     const stub = stubFor("io-context");
-    const holder: { fiber?: Fiber.RuntimeFiber<unknown, unknown> } = {};
+    const holder: { fiber?: Fiber.Fiber<unknown, unknown> } = {};
 
     await runInDurableObject(stub, (_instance, ctx) => {
       holder.fiber = Effect.runFork(
@@ -25,7 +25,7 @@ describe("跨 handler 的 fiber", () => {
           yield* Effect.sleep("20 millis");
           yield* Effect.promise(() => ctx.storage.put("probe", "ok"));
           return yield* Effect.promise(() => ctx.storage.get("probe"));
-        })
+        }),
       );
     });
 
@@ -33,8 +33,8 @@ describe("跨 handler 的 fiber", () => {
       stub,
       async () =>
         await Effect.runPromise(
-          Fiber.await(holder.fiber!) as Effect.Effect<Exit.Exit<unknown, unknown>>
-        )
+          Fiber.await(holder.fiber!) as Effect.Effect<Exit.Exit<unknown, unknown>>,
+        ),
     );
 
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -52,7 +52,7 @@ describe("跨 handler 的 fiber", () => {
           yield* Effect.sleep("500 millis");
           const state = instance.state as ChatState;
           instance.setState({ ...state, seq: 999 });
-        })
+        }),
       );
     });
 

@@ -24,8 +24,8 @@ export interface RetryPolicy {
 
 export interface Action<I, O, R = never> {
   readonly name: string;
-  readonly input: Schema.Schema<I, any>;
-  readonly output: Schema.Schema<O, any>;
+  readonly input: Schema.Codec<I, any>;
+  readonly output: Schema.Schema<O>;
   readonly run: (input: I) => Effect.Effect<O, ActionError, R>;
   /**
    * 整次 runAction（包含 retry / backoff）的應用層時間預算。
@@ -44,9 +44,7 @@ export interface Action<I, O, R = never> {
 export type AnyAction<R = never> = Action<any, any, R>;
 export type ActionRegistry<R = never> = Readonly<Record<string, AnyAction<R>>>;
 
-export const defineAction = <I, O, R = never>(
-  action: Action<I, O, R>
-): Action<I, O, R> => action;
+export const defineAction = <I, O, R = never>(action: Action<I, O, R>): Action<I, O, R> => action;
 
 const DEFAULT_TIMEOUT_MS = 25_000;
 
@@ -61,19 +59,18 @@ const DEFAULT_TIMEOUT_MS = 25_000;
  */
 export const runAction = <I, O, R>(
   action: Action<I, O, R>,
-  params: unknown
+  params: unknown,
 ): Effect.Effect<O, ActionError, R> => {
-  const wrap = (message: string) =>
-    new ActionError({ action: action.name, message });
+  const wrap = (message: string) => new ActionError({ action: action.name, message });
 
-  const executed = Schema.decodeUnknown(action.input)(params).pipe(
+  const executed = Schema.decodeUnknownEffect(action.input)(params).pipe(
     Effect.mapError((e) => wrap(`invalid input: ${e.message}`)),
     Effect.flatMap(action.run),
     Effect.flatMap((out) =>
-      Schema.validate(action.output)(out).pipe(
-        Effect.mapError((e) => wrap(`invalid output: ${e.message}`))
-      )
-    )
+      Schema.decodeUnknownEffect(Schema.toType(action.output))(out).pipe(
+        Effect.mapError((e) => wrap(`invalid output: ${e.message}`)),
+      ),
+    ),
   );
 
   const retried =
@@ -81,15 +78,13 @@ export const runAction = <I, O, R>(
       ? executed
       : Effect.retry(executed, {
           times: action.retry.maxRetries,
-          schedule: Schedule.exponential(
-            Duration.millis(action.retry.backoffMs)
-          )
+          schedule: Schedule.exponential(Duration.millis(action.retry.backoffMs)),
         });
 
   return retried.pipe(
-    Effect.timeoutFail({
+    Effect.timeoutOrElse({
       duration: Duration.millis(action.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      onTimeout: () => wrap("timed out")
-    })
+      orElse: () => Effect.fail(wrap("timed out")),
+    }),
   );
 };

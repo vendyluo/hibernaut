@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
-    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"],
+    "types": ["@cloudflare/workers-types"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
@@ -12,5 +12,5 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true
   },
-  "include": ["src", "test", "test-workers", "vitest.config.ts", "worker-configuration.d.ts"]
+  "include": ["src", "test", "test-workers", "worker-configuration.d.ts", "vite.config.ts"]
 }

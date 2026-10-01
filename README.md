@@ -18,7 +18,7 @@ The example needs no AI key and creates no cloud resources. It echoes text so th
 
 ## Requirements and setup
 
-[Node.js 24 LTS](https://nodejs.org/) is recommended. The template pins `agents` to the exact SDK version whose behavior is covered by its tests; review the tests and current Cloudflare documentation before upgrading it.
+[Node.js 24 LTS](https://nodejs.org/) (24.11 or newer) is recommended. The template pins `agents` to the exact SDK version whose behavior is covered by its tests; review the tests and current Cloudflare documentation before upgrading it.
 
 Use GitHub's **Use this template → Create a new repository**, then clone your new repository and run the commands from its root. The license decision is still pending; see the release preflight before redistribution.
 
@@ -27,6 +27,16 @@ npm ci
 npm run typecheck
 npm test
 ```
+
+The toolchain pins Vite+ 1.0.0 and Effect 4.0.0. Core tests use Vite+'s bundled
+Vitest 5.0.1. The `test-workers` npm workspace retains Vitest 4.1.11 because
+Cloudflare's pinned pool supports only Vitest 4.1; root `npm ci` installs both
+runners, and `npm test` runs both suites. Keep their dependencies separate and
+do not add a global Vitest override. The worker workspace also pins Vitest 4's
+optional UI/browser-preview peers to prevent npm from binding them to v5; these
+packages do not enable browser or UI tests. `npm run check` runs Vite+ format/lint checks;
+`npm run typecheck` checks the source and both test suites. Worker dev/build stay
+on Wrangler (`npm run dev` / `npm run build`).
 
 Focused suites are also available:
 

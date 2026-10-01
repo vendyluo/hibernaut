@@ -18,7 +18,7 @@
 
 ## 需求與安裝
 
-建議使用 [Node.js 24 LTS](https://nodejs.org/)。模板會把 `agents` 鎖在測試所支援的確切 SDK 版本；升級前請重新檢查測試與當時最新的 Cloudflare 文件。
+建議使用 [Node.js 24 LTS](https://nodejs.org/)（24.11 以上）。模板會把 `agents` 鎖在測試所支援的確切 SDK 版本；升級前請重新檢查測試與當時最新的 Cloudflare 文件。
 
 使用 GitHub 的 **Use this template → Create a new repository**，clone 新 repository 後，在根目錄執行下列命令。授權尚待確認，再散布前請先查看 release preflight。
 
@@ -27,6 +27,15 @@ npm ci
 npm run typecheck
 npm test
 ```
+
+工具鏈鎖定 Vite+ 1.0.0 與 Effect 4.0.0。核心測試使用 Vite+ 內建的
+Vitest 5.0.1；`test-workers` npm workspace 保留 Vitest 4.1.11，因為鎖定的
+Cloudflare pool 只支援 Vitest 4.1。根目錄的 `npm ci` 會安裝兩套 runner，
+`npm test` 會執行兩套測試。請保留 runner 的依賴隔離，勿加入全域 Vitest override。
+Workers workspace 也固定 Vitest 4 的 optional UI／browser-preview peers，避免
+npm 將它們解析到 v5；這些套件不會啟用 UI 或瀏覽器測試。
+`npm run check` 執行 Vite+ 格式與 lint 檢查；`npm run typecheck` 檢查程式與
+兩套測試。Worker 開發與打包仍使用 Wrangler（`npm run dev`／`npm run build`）。
 
 也可以分別執行：
 

@@ -16,13 +16,13 @@
  * 不要用。這個專案裡持久性只有一個擁有者，就是 Cloudflare。
  */
 import { Agent, type Connection } from "agents";
-import { Cause, Either, Exit, Layer, ManagedRuntime, Schema } from "effect";
+import { Cause, Result, Exit, Layer, ManagedRuntime, Schema } from "effect";
 import {
   ActionError,
   runAction,
   type Action,
   type ActionRegistry,
-  type AnyAction
+  type AnyAction,
 } from "../core/action.js";
 import type { AgentDef, TaggedAction } from "../core/agent.js";
 import type { Directive, Outcome, RunInstruction } from "../core/directive.js";
@@ -31,7 +31,7 @@ export abstract class DirectiveAgent<
   Env extends Cloudflare.Env,
   S,
   A extends TaggedAction,
-  R = never
+  R = never,
 > extends Agent<Env, S> {
   protected abstract readonly def: AgentDef<S, A>;
   protected abstract readonly actions: ActionRegistry<R>;
@@ -112,14 +112,14 @@ export abstract class DirectiveAgent<
   }
 
   private async initialize(): Promise<void> {
-    const validated = Schema.validateEither(this.def.state)(this.state);
-    if (Either.isLeft(validated)) {
+    const validated = Schema.decodeUnknownResult(Schema.toType(this.def.state))(this.state);
+    if (Result.isFailure(validated)) {
       // 刻意**不**重置狀態：原始資料原封不動留在 SQLite 供人工判讀。
       // 壞掉的狀態要怎麼處理是資料契約決策，不該由 runtime 默默決定。
-      this.#quarantine = validated.left.message;
+      this.#quarantine = validated.failure.message;
       this.onFail(
         "persisted state failed schema validation; agent quarantined",
-        validated.left.message
+        validated.failure.message,
       );
       return;
     }
@@ -192,9 +192,7 @@ export abstract class DirectiveAgent<
    * 關鍵是 `RunInstruction` 排在 `ScheduleAction` 後面。逾時守衛必須在那通
    * 可能永遠不回來的呼叫**開始之前**就已經寫進 SQLite。
    */
-  private async applyDirectives(
-    directives: ReadonlyArray<Directive<A>>
-  ): Promise<void> {
+  private async applyDirectives(directives: ReadonlyArray<Directive<A>>): Promise<void> {
     const order = (d: Directive<A>): number =>
       d._tag === "ScheduleAction"
         ? 0
@@ -244,7 +242,7 @@ export abstract class DirectiveAgent<
   private async armGuard(delaySeconds: number, action: A): Promise<boolean> {
     try {
       await this.schedule(delaySeconds, "resumeAction", action, {
-        idempotent: true
+        idempotent: true,
       });
       return true;
     } catch (error) {
@@ -268,11 +266,11 @@ export abstract class DirectiveAgent<
   async resumeAction(action: A): Promise<void> {
     const schema = this.def.scheduledAction;
     if (schema !== undefined) {
-      const validated = Schema.validateEither(schema)(action);
-      if (Either.isLeft(validated)) {
+      const validated = Schema.decodeUnknownResult(Schema.toType(schema))(action);
+      if (Result.isFailure(validated)) {
         this.onFail(
           "scheduled action failed schema validation; dropped",
-          validated.left.message
+          validated.failure.message,
         );
         return;
       }
@@ -296,15 +294,15 @@ export abstract class DirectiveAgent<
    */
   protected async runQuery<I, O>(
     action: Action<I, O, R>,
-    params: unknown
+    params: unknown,
   ): Promise<Exit.Exit<O, ActionError>> {
     await this.initializeOnce();
     if (this.#quarantine !== null) {
       return Exit.fail(
         new ActionError({
           action: action.name,
-          message: `agent quarantined: ${this.#quarantine}`
-        })
+          message: `agent quarantined: ${this.#quarantine}`,
+        }),
       );
     }
     return await this.runtime.runPromiseExit(runAction(action, params));
@@ -339,10 +337,7 @@ export abstract class DirectiveAgent<
     return null;
   }
 
-  override async onMessage(
-    _connection: unknown,
-    message: string | ArrayBuffer
-  ): Promise<void> {
+  override async onMessage(_connection: unknown, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return;
 
     const limit = this.maxInputBytes();
@@ -352,7 +347,7 @@ export abstract class DirectiveAgent<
         this.onEmit("rejected", {
           reason: "message too large",
           bytes,
-          limit
+          limit,
         });
         return;
       }
@@ -382,11 +377,7 @@ export abstract class DirectiveAgent<
     const outcome: Outcome =
       action === undefined
         ? { _tag: "Err", message: `unknown action: ${instruction.action}` }
-        : toOutcome(
-            await this.runtime.runPromiseExit(
-              runAction(action, instruction.params)
-            )
-          );
+        : toOutcome(await this.runtime.runPromiseExit(runAction(action, instruction.params)));
 
     // 必須是 `dispatchInitialized`，不能是公開的 `dispatch`。
     //
@@ -396,9 +387,9 @@ export abstract class DirectiveAgent<
     // 走公開入口就會 `await` 自己所在的 Promise —— 直接死鎖。
     // 同理適用於 `armGuard` 的 fallback。
     await this.dispatchInitialized({
-      ...(instruction.meta ?? {}),
+      ...instruction.meta,
       _tag: instruction.resultAction,
-      outcome
+      outcome,
     } as unknown as A);
   }
 

@@ -8,7 +8,7 @@ import {
   env,
   evictDurableObject,
   runDurableObjectAlarm,
-  runInDurableObject
+  runInDurableObject,
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { chatAgent, type ChatState } from "../src/example/chat.js";
@@ -32,16 +32,14 @@ const wake = async (stub: DurableObjectStub) => {
 
 const scheduleRows = async (stub: DurableObjectStub) =>
   runInDurableObject(stub, (_instance, ctx) =>
-    ctx.storage.sql
-      .exec("SELECT callback, payload, type FROM cf_agents_schedules")
-      .toArray()
+    ctx.storage.sql.exec("SELECT callback, payload, type FROM cf_agents_schedules").toArray(),
   );
 
 /** 直接寫入等待中的 state，選擇是否建立守衛；不會真的發出 provider 呼叫。 */
 const enterAwaitingModel = async (
   stub: DurableObjectStub<ChatAgent>,
   requestId: string,
-  opts: { deadlineInMs?: number; armGuard?: boolean; delaySeconds?: number } = {}
+  opts: { deadlineInMs?: number; armGuard?: boolean; delaySeconds?: number } = {},
 ) => {
   const { deadlineInMs = 60_000, armGuard = true, delaySeconds = 30 } = opts;
   await runInDurableObject(stub, async (instance: ChatAgent) => {
@@ -50,14 +48,14 @@ const enterAwaitingModel = async (
       phase: {
         _tag: "AwaitingModel",
         requestId,
-        deadlineAt: Date.now() + deadlineInMs
+        deadlineAt: Date.now() + deadlineInMs,
       },
-      seq: 1
+      seq: 1,
     });
     if (armGuard) {
       await instance.schedule(delaySeconds, "resumeAction", {
         _tag: "ModelTimeout",
-        requestId
+        requestId,
       });
     }
   });
@@ -106,7 +104,7 @@ describe("Durable Object 驅逐", () => {
     expect(rows[0]).toMatchObject({
       callback: "resumeAction",
       type: "delayed",
-      payload: JSON.stringify({ _tag: "ModelTimeout", requestId: "req-1" })
+      payload: JSON.stringify({ _tag: "ModelTimeout", requestId: "req-1" }),
     });
   });
 
@@ -122,7 +120,7 @@ describe("Durable Object 驅逐", () => {
     await runInDurableObject(stub, (_instance, ctx) => {
       ctx.storage.sql.exec(
         "UPDATE cf_agents_schedules SET time = ?",
-        Math.floor(Date.now() / 1000) - 1
+        Math.floor(Date.now() / 1000) - 1,
       );
     });
 
@@ -148,7 +146,7 @@ describe("Durable Object 驅逐", () => {
         "first",
         "echo: first",
         "second",
-        "echo: second"
+        "echo: second",
       ]);
     });
   });
@@ -201,7 +199,7 @@ describe("守衛沒排成功時的自我修復", () => {
     const stub = stubFor("reconcile-rearm");
     await enterAwaitingModel(stub, "req-1", {
       deadlineInMs: 60_000,
-      armGuard: false
+      armGuard: false,
     });
 
     expect(await scheduleRows(stub)).toHaveLength(0);
@@ -213,7 +211,7 @@ describe("守衛沒排成功時的自我修復", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       callback: "resumeAction",
-      payload: JSON.stringify({ _tag: "ModelTimeout", requestId: "req-1" })
+      payload: JSON.stringify({ _tag: "ModelTimeout", requestId: "req-1" }),
     });
   });
 
@@ -237,7 +235,7 @@ describe("守衛沒排成功時的自我修復", () => {
     const stub = stubFor("reconcile-idempotent");
     await enterAwaitingModel(stub, "req-1", {
       deadlineInMs: 60_000,
-      armGuard: false
+      armGuard: false,
     });
 
     for (let i = 0; i < 3; i++) {
@@ -261,14 +259,18 @@ describe("初始化只完成一次，而且所有呼叫都等待同一輪", () =
       };
       const action = { _tag: "UserMessage", text: "retry", now: Date.now() } as const;
       const results = await Promise.allSettled([
-        instance.dispatch(action), instance.dispatch(action)
+        instance.dispatch(action),
+        instance.dispatch(action),
       ]);
       expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
       expect(attempts).toBe(1);
       expect(instance.state).toEqual({ messages: [], phase: { _tag: "Idle" }, seq: 0 });
       await instance.dispatch(action);
       expect(attempts).toBe(2);
-      expect(instance.state.messages.map((message) => message.text)).toEqual(["retry", "echo: retry"]);
+      expect(instance.state.messages.map((message) => message.text)).toEqual([
+        "retry",
+        "echo: retry",
+      ]);
       await instance.reconcileNow();
       expect(attempts).toBe(2);
     });
@@ -282,9 +284,15 @@ describe("初始化只完成一次，而且所有呼叫都等待同一輪", () =
       const repeated = await instance.schedule(10, "resumeAction", payload, { idempotent: true });
       expect(repeated.id).toBe(first.id);
       expect(repeated.time).toBe(first.time);
-      const different = await instance.schedule(10, "resumeAction", {
-        ...payload, requestId: "req-other"
-      }, { idempotent: true });
+      const different = await instance.schedule(
+        10,
+        "resumeAction",
+        {
+          ...payload,
+          requestId: "req-other",
+        },
+        { idempotent: true },
+      );
       expect(different.id).not.toBe(first.id);
       expect(different.time).toBeLessThan(first.time);
     });
@@ -311,18 +319,18 @@ describe("初始化只完成一次，而且所有呼叫都等待同一輪", () =
         cmd: (state, action) => {
           cmdCalls += 1;
           return originalDef.cmd(state, action);
-        }
+        },
       };
 
       const first = instance.dispatch({
         _tag: "UserMessage",
         text: "first",
-        now: Date.now()
+        now: Date.now(),
       });
       const second = instance.dispatch({
         _tag: "UserMessage",
         text: "second",
-        now: Date.now()
+        now: Date.now(),
       });
 
       await Promise.resolve();
@@ -360,20 +368,18 @@ describe("初始化只完成一次，而且所有呼叫都等待同一輪", () =
                     action: "callModel",
                     params: { messages: [{ role: "user", text: "hi" }] },
                     resultAction: "ModelResult",
-                    meta: { requestId: "req-x" }
-                  }
-                ]
+                    meta: { requestId: "req-x" },
+                  },
+                ],
               }
-            : chatAgent.cmd(state, action)
+            : chatAgent.cmd(state, action),
       };
 
       return await Promise.race([
         instance
           .dispatch({ _tag: "UserMessage", text: "hi", now: Date.now() })
           .then(() => "completed" as const),
-        new Promise<"deadlocked">((resolve) =>
-          setTimeout(() => resolve("deadlocked"), 1_500)
-        )
+        new Promise<"deadlocked">((resolve) => setTimeout(() => resolve("deadlocked"), 1_500)),
       ]);
     });
 

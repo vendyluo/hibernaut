@@ -31,7 +31,7 @@ const writeCorruptState = (stub: DurableObjectStub<ChatAgent>) =>
     instance.setState({
       messages: [],
       phase: { _tag: "AwaitingModel", requestId: "req-1" },
-      seq: 1
+      seq: 1,
     } as unknown as ChatState);
   });
 
@@ -45,14 +45,16 @@ describe("持久狀態驗證", () => {
       };
       let cmdCalls = 0;
       const failures: string[] = [];
-      target.onFail = (reason) => { failures.push(reason); };
+      target.onFail = (reason) => {
+        failures.push(reason);
+      };
       target.def = {
         ...chatAgent,
         state: Schema.Struct({ ...ChatState.fields, seq: Schema.NumberFromString }),
         cmd: (state, action) => {
           cmdCalls += 1;
           return chatAgent.cmd(state, action);
-        }
+        },
       };
       const stored = { messages: [], phase: { _tag: "Idle" }, seq };
       instance.setState(stored as ChatState);
@@ -71,47 +73,55 @@ describe("持久狀態驗證", () => {
     });
   });
 
-  it.each(["req-1", " req-1 "])("validates scheduled requestId %j without normalizing it", async (requestId) => {
-    const stub = stubFor(`scheduled-type-side-${requestId.length}`);
-    await runInDurableObject(stub, async (instance: ChatAgent) => {
-      const target = instance as unknown as {
-        def: typeof chatAgent;
-        onFail: (reason: string) => void;
-      };
-      const failures: string[] = [];
-      target.onFail = (reason) => { failures.push(reason); };
-      target.def = {
-        ...chatAgent,
-        scheduledAction: Schema.Struct({
-          _tag: Schema.Literal("ModelTimeout"),
-          requestId: Schema.Trim
-        })
-      };
-      await instance.dispatch({ _tag: "ModelTimeout", requestId: "unused" });
-      instance.setState({
-        messages: [], seq: 1,
-        phase: { _tag: "AwaitingModel", requestId: "req-1", deadlineAt: Date.now() + 60_000 }
+  it.each(["req-1", " req-1 "])(
+    "validates scheduled requestId %j without normalizing it",
+    async (requestId) => {
+      const stub = stubFor(`scheduled-type-side-${requestId.length}`);
+      await runInDurableObject(stub, async (instance: ChatAgent) => {
+        const target = instance as unknown as {
+          def: typeof chatAgent;
+          onFail: (reason: string) => void;
+        };
+        const failures: string[] = [];
+        target.onFail = (reason) => {
+          failures.push(reason);
+        };
+        target.def = {
+          ...chatAgent,
+          scheduledAction: Schema.Struct({
+            _tag: Schema.Literal("ModelTimeout"),
+            requestId: Schema.Trim,
+          }),
+        };
+        await instance.dispatch({ _tag: "ModelTimeout", requestId: "unused" });
+        instance.setState({
+          messages: [],
+          seq: 1,
+          phase: { _tag: "AwaitingModel", requestId: "req-1", deadlineAt: Date.now() + 60_000 },
+        });
+        const before = instance.state;
+
+        await instance.resumeAction({ _tag: "ModelTimeout", requestId });
+
+        if (requestId === "req-1") {
+          expect(instance.state.phase).toEqual({ _tag: "Idle" });
+          expect(failures).toEqual([]);
+        } else {
+          expect(instance.state).toEqual(before);
+          expect(failures).toEqual(["scheduled action failed schema validation; dropped"]);
+        }
       });
-      const before = instance.state;
-
-      await instance.resumeAction({ _tag: "ModelTimeout", requestId });
-
-      if (requestId === "req-1") {
-        expect(instance.state.phase).toEqual({ _tag: "Idle" });
-        expect(failures).toEqual([]);
-      } else {
-        expect(instance.state).toEqual(before);
-        expect(failures).toEqual(["scheduled action failed schema validation; dropped"]);
-      }
-    });
-  });
+    },
+  );
 
   it("malformed scheduled payload is reported and cannot enter cmd", async () => {
     const stub = stubFor("bad-schedule-payload");
     await runInDurableObject(stub, async (instance: ChatAgent) => {
       const failures: string[] = [];
       const target = instance as unknown as { onFail: (reason: string) => void };
-      target.onFail = (reason) => { failures.push(reason); };
+      target.onFail = (reason) => {
+        failures.push(reason);
+      };
       const before = instance.state;
       await instance.resumeAction({ _tag: "ModelTimeout", requestId: 42 } as never);
       expect(failures).toEqual(["scheduled action failed schema validation; dropped"]);
@@ -126,8 +136,14 @@ describe("持久狀態驗證", () => {
     await runInDurableObject(stub, async (instance: ChatAgent) => {
       let ran = false;
       const query = defineAction({
-        name: "query-probe", input: Schema.Void, output: Schema.String,
-        run: () => Effect.sync(() => { ran = true; return "should not run"; })
+        name: "query-probe",
+        input: Schema.Void,
+        output: Schema.String,
+        run: () =>
+          Effect.sync(() => {
+            ran = true;
+            return "should not run";
+          }),
       });
       const target = instance as unknown as {
         runQuery: (action: typeof query, params: unknown) => Promise<Exit.Exit<string, unknown>>;

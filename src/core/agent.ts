@@ -44,7 +44,7 @@ export interface AgentDef<S, A extends TaggedAction> {
    * 儲存的是 JSON-compatible 的 S，驗證 schema 的 Type 側，不執行 decode/encode。
    * 轉換型 schema 不會自動遷移舊資料；migration 必須另行明確處理。
    */
-  readonly state: Schema.Schema<S, any>;
+  readonly state: Schema.Schema<S>;
   readonly initialState: S;
   /** 純函式。同樣輸入永遠同樣輸出。 */
   readonly cmd: (state: S, action: A) => CmdResult<S, A>;
@@ -67,7 +67,7 @@ export interface AgentDef<S, A extends TaggedAction> {
    * 反而過不了 variance。
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly scheduledAction?: Schema.Schema<any, any>;
+  readonly scheduledAction?: Schema.Schema<any>;
   /**
    * 自我修復。純函式：看著狀態回答「要把自己修回一致，該做哪個 action？」
    * 不需要修就回 `null`。
@@ -87,18 +87,16 @@ export interface AgentDef<S, A extends TaggedAction> {
   readonly reconcile?: (state: S, now: number) => A | null;
 }
 
-export const defineAgent = <S, A extends TaggedAction>(
-  def: AgentDef<S, A>
-): AgentDef<S, A> => def;
+export const defineAgent = <S, A extends TaggedAction>(def: AgentDef<S, A>): AgentDef<S, A> => def;
 
 /** 沒有任何外部效果的 `cmd` 回傳值。 */
 export const only = <S, A>(state: S): CmdResult<S, A> => ({
   state,
-  directives: []
+  directives: [],
 });
 
 /** 狀態不變、只送出效果。 */
 export const effects = <S, A>(
   state: S,
-  directives: ReadonlyArray<Directive<A>>
+  directives: ReadonlyArray<Directive<A>>,
 ): CmdResult<S, A> => ({ state, directives });

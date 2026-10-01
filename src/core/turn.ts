@@ -24,11 +24,9 @@ export interface TurnGuard {
  * 由 seq 導出下一個請求。seq 耗盡（極端防禦）回 `null`，呼叫端應拒絕本輪。
  */
 export const nextRequest = (
-  seq: number
+  seq: number,
 ): { readonly seq: number; readonly requestId: string } | null =>
-  seq >= Number.MAX_SAFE_INTEGER
-    ? null
-    : { seq: seq + 1, requestId: `req-${seq + 1}` };
+  seq >= Number.MAX_SAFE_INTEGER ? null : { seq: seq + 1, requestId: `req-${seq + 1}` };
 
 /** 期限 = 邊界取好的 now + 逾時秒數。 */
 export const guardDeadline = (now: number, timeoutSeconds: number): number =>
@@ -48,12 +46,9 @@ export const reconcileTurn = <A>(
   guard: TurnGuard | null,
   now: number,
   onExpired: (requestId: string) => A,
-  onRearm: (requestId: string, remainingSeconds: number) => A
+  onRearm: (requestId: string, remainingSeconds: number) => A,
 ): A | null => {
   if (guard === null) return null;
   if (now >= guard.deadlineAt) return onExpired(guard.requestId);
-  return onRearm(
-    guard.requestId,
-    Math.max(1, Math.ceil((guard.deadlineAt - now) / 1_000))
-  );
+  return onRearm(guard.requestId, Math.max(1, Math.ceil((guard.deadlineAt - now) / 1_000)));
 };

@@ -61,7 +61,7 @@ await point 允許 interleaving，因此明確 busy rejection 是為了避免回
 
 Persisted state 與 scheduled payload 會在 activation/callback 時過 schema 驗證。Invalid state 會被 quarantine 而不默默 reset；invalid scheduled payload 會被丟棄並回報。實作限制 input 與 retained history 大小，但沒有通用 schema migration 機制。
 
-這些邊界使用 `Schema.validateEither`：儲存的值必須已符合 schema 解碼後的 **Type** 側，且能以 JSON 表示。Shell 不會呼叫 schema encoder，也不會在恢復時做轉換。例如 `NumberFromString` 要求儲存數字而非數字字串；`Trim` 會拒絕未裁除空白的 scheduled ID，不會改變其識別值。Action input 是不同的契約：`runAction` 會在執行前明確 decode。需要遷移的 schema 變更，必須另行設計明確的資料遷移流程。
+這些邊界使用 `Schema.decodeUnknownResult(Schema.toType(schema))`：儲存的值必須已符合 schema 解碼後的 **Type** 側，且能以 JSON 表示。Shell 不會呼叫 schema encoder，也不會在恢復時做轉換。例如 `NumberFromString` 要求儲存數字而非數字字串；`Trim` 會拒絕未裁除空白的 scheduled ID，不會改變其識別值。Action input 是不同的契約：`runAction` 會在執行前明確 decode。需要遷移的 schema 變更，必須另行設計明確的資料遷移流程。
 
 ## 安全性與預期用途
 
