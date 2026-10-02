@@ -46,8 +46,10 @@ export abstract class DirectiveAgent<
 
   #runtime: ManagedRuntime.ManagedRuntime<R, never> | undefined;
 
-  /** 非 null 表示持久狀態不符 schema，agent 已隔離、拒絕服務。 */
+  /** 非 null 表示狀態驗證失敗或提交結果不明，agent 已隔離。 */
   #quarantine: string | null = null;
+  /** A failed SDK commit may already have changed its memory cache. Only a new activation can clear this. */
+  #uncertainCommit: TurnError | null = null;
 
   /**
    * ManagedRuntime 建一次並重用，避免每個請求重建 Layer。
@@ -93,6 +95,7 @@ export abstract class DirectiveAgent<
    * 由 `onStart()` 與所有公開入口共同保證，共享 Promise 讓並行呼叫等待同一輪。
    */
   private async initializeOnce(): Promise<void> {
+    if (this.#uncertainCommit !== null) return;
     if (this.#initialized) return;
 
     if (this.#initialization !== undefined) {
@@ -180,6 +183,7 @@ export abstract class DirectiveAgent<
   }
 
   private async dispatchInitialized(action: A): Promise<void> {
+    if (this.#uncertainCommit !== null) throw this.#uncertainCommit;
     let candidate;
     try {
       candidate = this.def.cmd(this.state, action);
@@ -199,7 +203,10 @@ export abstract class DirectiveAgent<
       this.setState(candidate.state);
     } catch (error) {
       // A storage error is not evidence that the write had no effect.
-      throw new TurnError("commit", "unknown", error);
+      this.#uncertainCommit = new TurnError("commit", "unknown", error);
+      this.#quarantine =
+        "commit result is uncertain; activation quarantined until eviction or restart";
+      throw this.#uncertainCommit;
     }
     try {
       await this.applyDirectives(candidate.directives);
@@ -279,6 +286,8 @@ export abstract class DirectiveAgent<
             : 3;
 
     for (const directive of [...directives].sort((a, b) => order(a) - order(b))) {
+      // Another admitted Turn can fail while this batch is awaiting an external call.
+      if (this.#uncertainCommit !== null) throw this.#uncertainCommit;
       if (!(await this.applyDirective(directive))) return;
     }
   }

@@ -47,6 +47,8 @@ Workflow 以持久步驟回寫終態，60 秒 interval watcher 補查回寫遺�
 
 新收據與 Workflow parameters 會在接受工作時綁定 `contract.workflowVersion` 與 `contract.policyVersion`。沒有這些欄位的舊收據與執行中 v1 payload 固定解析為原本 v1 契約。未知版本會拒絕，不回退到目前預設值。v1 政策 registry 已凍結；修改產品時保留原語意並新增 registry／Workflow 版本。這是明確相容處理，不是自動資料遷移。
 
+所有既有收據的更新都經過同步轉移入口：重新讀取 SQLite 的最新值、判斷、寫入，中間不含 await。終態收據完全不再改寫，工作識別與契約也不在可更新欄位內。跨 binding 呼叫回來後重新查核，避免取消與期限處理沿用舊快照。Watcher 清理依 callback 與工作 key 找出所有所屬排程，涵蓋結案後才建立的 watcher，也保留其他工作的排程。
+
 ## Hibernation 是資格條件，不是計時器
 
 Durable Object 通常必須閒置，且沒有阻止 hibernation 的項目才有資格休眠：不能有 timer、尚在進行且被 await 的 fetch、active event、standard WebSocket 或 outbound socket。Cloudflare 對一般 hibernation eligibility 記載的是 10 秒 idle period。文件中的 70–140 秒指無法 hibernate 的 idle object 被 eviction 的區間，不是週期性喚醒，也不是 SLA。deployment 與 restart 也可能清掉記憶體。
@@ -56,6 +58,8 @@ Durable Object 通常必須閒置，且沒有阻止 hibernation 的項目才有�
 來源：[Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)。
 
 ## Dispatch 與初始化
+
+SDK 可能先更新記憶體 cache 才寫 SQLite。提交結果不明時，shell 隔離整個 activation，停止新的領域指令、query、晚到的 instruction result 與後續 directive；已經發出的外部效果不會撤銷。同一 activation 的重新初始化不會解除隔離，必須在 eviction 或完整重啟後，由新 activation 讀回實際持久狀態。這犧牲暫時可用性來避免使用未確認狀態；shell 不猜測回滾或自動重試。
 
 寫入或執行效果前，shell 先透過 property descriptor 檢查完整候選資料，拒絕 accessor 與自訂陣列 prototype，不執行 getter 或序列化 hook。接著在 schema 的 Type 側驗證完整候選狀態，並驗證整批 directive（含 scheduled payload 與已登記的 instruction target）。驗證不會 decode 或遷移候選資料。無效候選不寫入、不送出任何效果。
 

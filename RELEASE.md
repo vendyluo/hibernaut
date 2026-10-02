@@ -4,6 +4,31 @@ Prepared 2026-09-12. Nothing has been pushed, released, deployed, renamed remote
 published to npm, or posted externally by this work. GitHub already reports the
 repository as public and `isTemplate: true`.
 
+## Receipt transitions and uncertain commits — 2026-10-02
+
+Local changes based on `2a0935804506f6a6b58a86d53fe8405a61ae4149`.
+Existing TaskAgent receipt updates now share a synchronous latest-state transition
+that preserves terminal receipts and excludes identity/contract changes. Cancellation
+and deadline continuations recheck storage after awaits. Cleanup finds watchers by
+task ownership, including late watchers, while preserving other jobs' schedules.
+
+An uncertain shell commit quarantines the activation because the pinned SDK may
+have changed its memory cache before storage fails. New commands, queries and late
+instruction results cannot continue; a fresh activation reloads actual storage.
+This intentionally reduces availability until eviction/restart and cannot undo
+already admitted external effects.
+
+On macOS arm64, Node 24.21.0/npm 11.19.0: **112 tests pass** (50 core,
+62 workerd), plus `npm run check`, `npm run typecheck` and `git diff --check`.
+Regressions control completion/cancellation and deadline interleavings, retain
+terminal output across eviction, check owned watcher cleanup, inject storage
+failures before/after writes, and block a provider result arriving after quarantine.
+These use local Workerd and injected failures; they do not establish production
+storage-failure or concurrency behavior. The existing restart/WebSocket smoke was
+not repeated; the affected behavior is covered by the final Workerd suite.
+The dry-run bundle is **2854.83 KiB raw / 536.96 KiB gzip**.
+No commit, push, remote CI or deployment was performed for this fix.
+
 ## Review fixes — 2026-10-02
 
 The follow-up rejects custom array prototypes and inspects the complete candidate

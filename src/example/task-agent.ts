@@ -36,6 +36,32 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
       .sql`INSERT OR REPLACE INTO hibernaut_tasks (key, record) VALUES (${record.key}, ${JSON.stringify(record)})`;
   }
 
+  /** No await between reading, deciding and writing. Terminal receipts are immutable. */
+  private transition(
+    key: string,
+    change: (
+      current: TaskRecord,
+    ) => Partial<Pick<TaskRecord, "status" | "watcherId" | "termination" | "output" | "error">>,
+  ): TaskRecord {
+    const current = this.read(key);
+    if (!current) throw new Error("Unknown task receipt");
+    if (isTerminal(current.status)) return current;
+    const next = { ...current, ...change(current) };
+    this.write(next);
+    return next;
+  }
+
+  /** A watcher can be created after settlement; clean by ownership, not a stale saved ID. */
+  private async cleanupWatchers(key: string): Promise<void> {
+    for (const schedule of await this.listSchedules()) {
+      if (
+        schedule.callback === "watchTask" &&
+        (schedule.payload as { key?: string } | undefined)?.key === key
+      )
+        await this.cancelSchedule(schedule.id);
+    }
+  }
+
   async submitTask(key: string, request: TaskRequest): Promise<TaskRecord> {
     if (!taskKeyPattern.test(key)) throw new Error("Invalid task key");
     const validated = Schema.decodeUnknownResult(TaskRequest)(request);
@@ -81,8 +107,7 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
       // Reserve identity first; then arm recovery before creating or acknowledging the Workflow.
       // Each key owns a watcher, so terminal cleanup cannot remove another job's wake-up.
       const watcher = await this.scheduleEvery(60, "watchTask", { key });
-      const current = this.read(key)!;
-      this.write({ ...current, watcherId: watcher.id });
+      const current = this.transition(key, () => ({ watcherId: watcher.id }));
       if (isTerminal(current.status)) await this.cancelSchedule(watcher.id);
       else if (current.status === "submitting") await this.ensureWorkflow(current);
     }
@@ -93,10 +118,14 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
     if (!record.watcherId) {
       // Inspection can recover an unacknowledged submission too; arm it before starting work.
       const watcher = await this.scheduleEvery(60, "watchTask", { key: record.key });
-      record = this.read(record.key)!;
-      record = { ...record, watcherId: watcher.id };
-      this.write(record);
+      record = this.transition(record.key, () => ({ watcherId: watcher.id }));
+      if (isTerminal(record.status)) {
+        await this.cancelSchedule(watcher.id);
+        return;
+      }
     }
+    record = this.read(record.key)!;
+    if (isTerminal(record.status)) return;
     try {
       await this.env.TaskWorkflow.create({
         id: record.workflowId,
@@ -118,8 +147,9 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
         throw error;
       }
     }
-    const current = this.read(record.key)!;
-    if (current.status === "submitting") this.write({ ...current, status: "queued" });
+    this.transition(record.key, (current) =>
+      current.status === "submitting" ? { status: "queued" } : {},
+    );
   }
 
   async getTask(key: string): Promise<TaskRecord | null> {
@@ -138,11 +168,12 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
   }
 
   async cancelTask(key: string): Promise<TaskRecord | null> {
-    const record = await this.getTask(key);
-    if (!record || isTerminal(record.status)) return record;
+    if (!(await this.getTask(key))) return null;
     // Persist intent before the cross-binding call so a lost response is recoverable.
-    this.write({ ...record, termination: record.termination ?? "cancel" });
-    await this.reconcileTask(this.read(key)!);
+    const record = this.transition(key, (current) => ({
+      termination: current.termination ?? "cancel",
+    }));
+    if (!isTerminal(record.status)) await this.reconcileTask(record);
     return this.read(key);
   }
 
@@ -156,11 +187,14 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
     const record = this.read(key);
     if (!record || record.workflowId !== workflowId) throw new Error("Unknown task receipt");
     // A late Workflow callback cannot reverse cancellation or overwrite another terminal outcome.
-    if (!isTerminal(record.status))
-      this.write({ ...record, status, ...(output ? { output } : {}), ...(error ? { error } : {}) });
+    this.transition(key, () => ({
+      status,
+      ...(output ? { output } : {}),
+      ...(error ? { error } : {}),
+    }));
     // Cleanup is retried by the watcher; it must not turn a persisted success into failure.
     try {
-      await this.cancelSchedule(record.watcherId);
+      await this.cleanupWatchers(key);
     } catch {
       /* watcher retries cleanup */
     }
@@ -169,38 +203,39 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
   async markTaskWaiting(key: string, workflowId: string): Promise<void> {
     const record = this.read(key);
     if (!record || record.workflowId !== workflowId) throw new Error("Unknown task receipt");
-    if (!isTerminal(record.status)) this.write({ ...record, status: "waiting" });
+    this.transition(key, () => ({ status: "waiting" }));
   }
 
   async watchTask({ key }: { key: string }): Promise<void> {
     const record = this.read(key);
     if (!record) {
       // An interrupted submission before receipt registration never accepted work.
-      const schedules = await this.listSchedules();
-      for (const schedule of schedules) {
-        if (
-          schedule.callback === "watchTask" &&
-          (schedule.payload as { key?: string } | undefined)?.key === key
-        )
-          await this.cancelSchedule(schedule.id);
-      }
+      await this.cleanupWatchers(key);
       return;
     }
-    if (isTerminal(record.status)) await this.cancelSchedule(record.watcherId);
+    if (isTerminal(record.status)) await this.cleanupWatchers(key);
     else await this.reconcileTask(record);
   }
 
   private async reconcileTask(record: TaskRecord): Promise<void> {
     if (record.status === "submitting") await this.ensureWorkflow(record);
+    record = this.read(record.key)!;
+    if (isTerminal(record.status)) return;
     const instance = await this.env.TaskWorkflow.get(record.workflowId);
     const state = await instance.status();
     if (state.status === "unknown") throw new Error("Workflow state is unavailable");
     record = this.read(record.key)!;
     if (isTerminal(record.status)) return;
     if (await this.projectTerminal(record, state)) return;
+    // A completion can arrive while projection is awaited. Never act on that old snapshot.
+    record = this.read(record.key)!;
+    if (isTerminal(record.status)) return;
     if (record.termination || Date.now() >= record.deadlineAt) {
-      const termination = record.termination ?? "deadline";
-      this.write({ ...record, termination });
+      record = this.transition(record.key, (current) => ({
+        termination: current.termination ?? "deadline",
+      }));
+      if (isTerminal(record.status)) return;
+      const termination = record.termination!;
       try {
         await instance.terminate();
       } catch (error) {
@@ -216,17 +251,14 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
         termination === "deadline" ? "Task deadline exceeded" : undefined,
       );
     } else {
-      const current = this.read(record.key)!;
-      if (!isTerminal(current.status))
-        this.write({
-          ...current,
-          status:
-            current.status === "waiting" || state.status === "waiting"
-              ? "waiting"
-              : state.status === "queued"
-                ? "queued"
-                : "running",
-        });
+      this.transition(record.key, (current) => ({
+        status:
+          current.status === "waiting" || state.status === "waiting"
+            ? "waiting"
+            : state.status === "queued"
+              ? "queued"
+              : "running",
+      }));
     }
   }
 
