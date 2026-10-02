@@ -39,8 +39,8 @@ export interface CmdResult<S, A> {
 export interface AgentDef<S, A extends TaggedAction> {
   readonly name: string;
   /**
-   * 狀態 schema。在信任邊界驗證：DO 每次醒來從 SQLite 讀回時。
-   * 由 `DirectiveAgent.onStart()` 實際執行 —— 驗證失敗會把 agent 隔離。
+   * 狀態 schema。醒來讀取 SQLite 時驗證，且每次提交前驗證完整候選。
+   * 已存狀態驗證失敗會隔離；候選驗證失敗會拒絕該次轉移，不寫入或執行效果。
    * 儲存的是 JSON-compatible 的 S，驗證 schema 的 Type 側，不執行 decode/encode。
    * 轉換型 schema 不會自動遷移舊資料；migration 必須另行明確處理。
    */

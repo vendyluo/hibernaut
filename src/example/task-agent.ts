@@ -5,6 +5,8 @@ import {
   taskKeyPattern,
   TaskRequest,
   TaskOutput,
+  currentTaskContract,
+  resolveTaskContract,
   type TaskRecord,
 } from "../core/task.js";
 
@@ -24,7 +26,9 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
     const rows = this.sql<{
       record: string;
     }>`SELECT record FROM hibernaut_tasks WHERE key = ${key}`;
-    return rows[0] ? (JSON.parse(rows[0].record) as TaskRecord) : null;
+    if (!rows[0]) return null;
+    const record = JSON.parse(rows[0].record) as TaskRecord;
+    return { ...record, contract: resolveTaskContract(record.contract) };
   }
 
   private write(record: TaskRecord): void {
@@ -61,6 +65,7 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
         record = {
           key,
           request,
+          contract: currentTaskContract,
           workflowId: Array.from(new Uint8Array(digest), (v) =>
             v.toString(16).padStart(2, "0"),
           ).join(""),
@@ -97,6 +102,7 @@ export class TaskAgent extends Agent<Cloudflare.Env> {
         id: record.workflowId,
         params: {
           version: 1,
+          contract: resolveTaskContract(record.contract),
           owner: this.name,
           key: record.key,
           request: record.request,

@@ -45,6 +45,8 @@ Workflow 以持久步驟回寫終態，60 秒 interval watcher 補查回寫遺�
 
 目前 task HTTP 範例沒有身分驗證、owner 授權或配額，不能直接公開。這些是產品正式交付前的必要邊界，不由 room 名稱提供隔離保證。Workflows API 與持久步驟契約見 [Workers API](https://developers.cloudflare.com/workflows/build/workers-api/) 與 [sleeping and retrying](https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/)。
 
+新收據與 Workflow parameters 會在接受工作時綁定 `contract.workflowVersion` 與 `contract.policyVersion`。沒有這些欄位的舊收據與執行中 v1 payload 固定解析為原本 v1 契約。未知版本會拒絕，不回退到目前預設值。v1 政策 registry 已凍結；修改產品時保留原語意並新增 registry／Workflow 版本。這是明確相容處理，不是自動資料遷移。
+
 ## Hibernation 是資格條件，不是計時器
 
 Durable Object 通常必須閒置，且沒有阻止 hibernation 的項目才有資格休眠：不能有 timer、尚在進行且被 await 的 fetch、active event、standard WebSocket 或 outbound socket。Cloudflare 對一般 hibernation eligibility 記載的是 10 秒 idle period。文件中的 70–140 秒指無法 hibernate 的 idle object 被 eviction 的區間，不是週期性喚醒，也不是 SLA。deployment 與 restart 也可能清掉記憶體。
@@ -54,6 +56,10 @@ Durable Object 通常必須閒置，且沒有阻止 hibernation 的項目才有�
 來源：[Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)。
 
 ## Dispatch 與初始化
+
+寫入或執行效果前，shell 先透過 property descriptor 檢查完整候選資料，拒絕 accessor 與自訂陣列 prototype，不執行 getter 或序列化 hook。接著在 schema 的 Type 側驗證完整候選狀態，並驗證整批 directive（含 scheduled payload 與已登記的 instruction target）。驗證不會 decode 或遷移候選資料。無效候選不寫入、不送出任何效果。
+
+失敗會拋出帶有 `stage` 與 `commitStatus` 的 `TurnError`：execution／validation 是 `not-committed`；儲存確認失敗是 `unknown`；directive 執行失敗是 `committed`。儲存錯誤不代表寫入一定失敗，重試前必須查核。效果失敗會停止後續效果，不回滾已提交狀態。既有守衛排程失敗仍透過 `onFail` 回報、執行終結守衛並中止該批效果，不是回滾。Provider 錯誤以 instruction outcome 回到領域狀態機，仍屬於 domain input。
 
 每個 action 都先由 shell 算出並持久化完整新 state，再把 scheduled guard 排到 emission 與 instruction 前面，最後執行 directives。本實作的 state persistence 與 schedule creation **不在同一個 transaction**；這不代表所有平台 storage API 都做不到更廣泛的原子操作。
 

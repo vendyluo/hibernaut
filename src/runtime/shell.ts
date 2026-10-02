@@ -26,6 +26,7 @@ import {
 } from "../core/action.js";
 import type { AgentDef, TaggedAction } from "../core/agent.js";
 import type { Directive, Outcome, RunInstruction } from "../core/directive.js";
+import { assertPortable, TurnError } from "../core/commit.js";
 
 export abstract class DirectiveAgent<
   Env extends Cloudflare.Env,
@@ -179,9 +180,84 @@ export abstract class DirectiveAgent<
   }
 
   private async dispatchInitialized(action: A): Promise<void> {
-    const { state, directives } = this.def.cmd(this.state, action);
-    this.setState(state);
-    await this.applyDirectives(directives);
+    let candidate;
+    try {
+      candidate = this.def.cmd(this.state, action);
+    } catch (error) {
+      throw new TurnError("execution", "not-committed", error);
+    }
+    try {
+      // Inspect descriptors before accessing candidate fields or letting schemas read getters.
+      assertPortable(candidate);
+      const validated = Schema.decodeUnknownResult(Schema.toType(this.def.state))(candidate.state);
+      if (Result.isFailure(validated)) throw new Error(validated.failure.message);
+      this.validateDirectives(candidate.directives);
+    } catch (error) {
+      throw new TurnError("validation", "not-committed", error);
+    }
+    try {
+      this.setState(candidate.state);
+    } catch (error) {
+      // A storage error is not evidence that the write had no effect.
+      throw new TurnError("commit", "unknown", error);
+    }
+    try {
+      await this.applyDirectives(candidate.directives);
+    } catch (error) {
+      // Includes failure of a subsequent instruction-result Turn. Never roll back this commit.
+      throw new TurnError("effects", "committed", error);
+    }
+  }
+
+  private validateDirectives(directives: ReadonlyArray<Directive<A>>): void {
+    if (!Array.isArray(directives)) throw new Error("Expected a directive list");
+    for (const directive of directives) {
+      assertPortable(directive);
+      const nonempty = (value: unknown) => typeof value === "string" && value.length > 0;
+      switch (directive._tag) {
+        case "Emit":
+          if (!nonempty(directive.event) || !("payload" in directive))
+            throw new Error("Invalid Emit");
+          break;
+        case "ScheduleAction": {
+          if (
+            !Number.isFinite(directive.delaySeconds) ||
+            directive.delaySeconds < 0 ||
+            !nonempty(directive.action?._tag)
+          )
+            throw new Error("Invalid ScheduleAction");
+          const schema = this.def.scheduledAction;
+          if (schema !== undefined) {
+            const result = Schema.decodeUnknownResult(Schema.toType(schema))(directive.action);
+            if (Result.isFailure(result)) throw new Error(result.failure.message);
+          }
+          break;
+        }
+        case "RunInstruction":
+          if (
+            !nonempty(directive.action) ||
+            !Object.hasOwn(this.actions, directive.action) ||
+            !nonempty(directive.resultAction) ||
+            !("params" in directive)
+          )
+            throw new Error("Invalid RunInstruction target or result action");
+          if (
+            directive.meta !== undefined &&
+            (directive.meta === null ||
+              Array.isArray(directive.meta) ||
+              typeof directive.meta !== "object")
+          )
+            throw new Error("Invalid instruction metadata");
+          break;
+        case "Fail":
+          if (!nonempty(directive.reason)) throw new Error("Invalid Fail");
+          break;
+        case "Stop":
+          break;
+        default:
+          throw new Error("Unknown directive");
+      }
+    }
   }
 
   /**

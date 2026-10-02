@@ -4,6 +4,43 @@ Prepared 2026-09-12. Nothing has been pushed, released, deployed, renamed remote
 published to npm, or posted externally by this work. GitHub already reports the
 repository as public and `isTemplate: true`.
 
+## Review fixes — 2026-10-02
+
+The follow-up rejects custom array prototypes and inspects the complete candidate
+through descriptors before schema evaluation. Regressions verify that inherited
+`toJSON`, nested getters and candidate-field getters never execute, and rejected
+candidates neither write state nor emit effects; stored state remains unchanged
+after eviction. The array regression failed before the fix and passed afterward.
+
+Final local checks: **105 tests pass** (50 core, 55 workerd), typecheck, format/lint
+and `git diff --check` pass. The dry-run bundle is **2853.62 KiB raw / 536.63 KiB
+gzip**. The process-restart/WebSocket smoke recorded below predates these two fixes
+and was not repeated; the final Workerd suite covers the affected runtime boundary.
+No commit, push or deployment was performed.
+
+## Jido v3 contract refinements — 2026-10-01
+
+Locally verified working-tree changes based on `0fd830d`; no commit, push or
+deployment was performed for this refinement. The existing Effect capability
+boundary and Cloudflare durable-execution ownership remain.
+
+- Candidate state, portable data and the complete directive batch are validated
+  before commit. `TurnError` distinguishes execution/validation, uncertain
+  storage acknowledgement and post-commit effect failures.
+- New receipts and Workflow payloads bind workflow/policy version 1. Legacy v1
+  payloads remain supported; unknown contracts are rejected without rewriting
+  stored receipts or starting work. Retained policy definitions are frozen.
+- On macOS arm64, Node 24.21.0/npm 11.19.0: **101 tests pass** (49 core,
+  52 workerd), plus `npm run check`, `npm run typecheck` and `git diff --check`.
+- Final `npm run build` dry run: **2853.50 KiB raw / 536.62 KiB gzip**.
+- Task accept/resume smoke passed across a complete Wrangler stop/restart on
+  port 8793 with `/private/tmp/hibernaut-jido-v3-20261001` persistence and
+  `/private/tmp/hibernaut-jido-v3-receipt.json`. Workflow identity, bound contract,
+  submission deduplication, approval and terminal output survived the restart.
+  The existing WebSocket smoke also passed against that isolated runtime.
+- Local dev processes were stopped. This evidence does not establish production
+  behavior, provider idempotency, remote CI or deployment results.
+
 ## Long-task agent verification — 2026-10-01
 
 The local working tree is based on upgrade commit `5349779`. That upgrade was

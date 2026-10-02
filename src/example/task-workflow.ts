@@ -6,7 +6,8 @@ import {
   shouldRetryTask,
   TaskRequest,
   TaskOutput,
-  taskPolicies,
+  getTaskPolicy,
+  resolveTaskContract,
   type TaskParams,
 } from "../core/task.js";
 
@@ -28,6 +29,11 @@ export class TaskWorkflow extends WorkflowEntrypoint<Cloudflare.Env, TaskParams>
         { retries: { limit: 0, delay: "1 second" } },
         async () => {
           if (event.payload.version !== 1) throw new NonRetryableError("Unsupported task version");
+          try {
+            resolveTaskContract(event.payload.contract);
+          } catch {
+            throw new NonRetryableError("Unsupported task contract");
+          }
           const result = Schema.decodeUnknownResult(TaskRequest)(event.payload.request);
           if (result._tag === "Failure") throw new NonRetryableError(result.failure.message);
           return result.success;
@@ -38,7 +44,8 @@ export class TaskWorkflow extends WorkflowEntrypoint<Cloudflare.Env, TaskParams>
         if (text.length === 0) throw new NonRetryableError("Text must not be blank");
         return text;
       });
-      const policy = taskPolicies[request.policy];
+      const contract = resolveTaskContract(event.payload.contract);
+      const policy = getTaskPolicy(contract, request.policy);
       const output = await step.do(
         "compose-v1",
         {
@@ -58,7 +65,10 @@ export class TaskWorkflow extends WorkflowEntrypoint<Cloudflare.Env, TaskParams>
           );
           if (Exit.isSuccess(exit)) return exit.value;
           const failure = Cause.findError(exit.cause);
-          if (failure._tag === "Success" && shouldRetryTask(request.policy, failure.success))
+          if (
+            failure._tag === "Success" &&
+            shouldRetryTask(request.policy, failure.success, contract)
+          )
             throw new Error(failure.success.message);
           throw new NonRetryableError(Cause.pretty(exit.cause));
         },

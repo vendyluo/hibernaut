@@ -30,6 +30,7 @@ if (phase !== "resume") {
   const accepted = await localFetch(url, { method: "PUT", body: JSON.stringify(body) });
   assert.equal(accepted.status, 202);
   const record = await accepted.json();
+  assert.deepEqual(record.contract, { workflowVersion: 1, policyVersion: 1 });
   await poll(url, "waiting");
   receipt = { url, workflowId: record.workflowId };
   await mkdir(dirname(receiptPath), { recursive: true });
@@ -42,12 +43,14 @@ if (phase !== "resume") {
 }
 if (phase !== "accept") {
   const waiting = await poll(receipt.url, "waiting");
+  assert.deepEqual(waiting.contract, { workflowVersion: 1, policyVersion: 1 });
   assert.equal(waiting.workflowId, receipt.workflowId);
   const duplicate = await localFetch(receipt.url, { method: "PUT", body: JSON.stringify(body) });
   assert.equal(duplicate.status, 202);
   assert.equal((await duplicate.json()).workflowId, receipt.workflowId);
   assert.equal((await localFetch(`${receipt.url}/approve`, { method: "POST" })).status, 202);
   const completed = await poll(receipt.url, "succeeded");
+  assert.deepEqual(completed.contract, waiting.contract);
   assert.deepEqual(completed.output, { text: "result: durable smoke" });
   console.log("Task resumed, deduped and retained terminal output", receipt.workflowId);
 }

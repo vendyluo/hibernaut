@@ -21,6 +21,13 @@ Cloudflare persistence/schedule boundary, and Effect execution.
 - [`Jido Action`](https://github.com/agentjido/jido_action/tree/d7940ea3ff51f2de605b3ff6c14fa25f05d3001a)
   informs the schema-in/schema-out Action terminology and timeout/retry concepts.
 
+The 2026-10-01 contract refinements reference Jido's v3 evaluation branch at
+[`35c9644`](https://github.com/agentjido/jido/tree/35c9644addfcf20c89f5d2bcaa3c2af045b45859):
+[Turns, Commit, and Effects](https://github.com/agentjido/jido/blob/35c9644addfcf20c89f5d2bcaa3c2af045b45859/guides/turns-commit-and-effects.md)
+and [Recoverable Effects](https://github.com/agentjido/jido/blob/35c9644addfcf20c89f5d2bcaa3c2af045b45859/guides/recoverable-effects.md).
+Hibernaut retains its pure decision boundary and Cloudflare-owned durable execution;
+this is a local adaptation, not Jido v3 API compatibility or a runtime port.
+
 Both upstream projects use Apache-2.0 and identify:
 **Copyright 2026 Mike Hostetler <mike.hostetler@gmail.com>**.
 Unmodified upstream license copies are retained at

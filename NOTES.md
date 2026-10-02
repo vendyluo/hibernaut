@@ -45,6 +45,8 @@ The promise assumes continuing availability of Cloudflare storage, alarms, Workf
 
 The task HTTP example has no authentication, owner authorization or quota enforcement and must not be exposed publicly as-is. A room name is not an authorization boundary. Platform contracts: [Workers API](https://developers.cloudflare.com/workflows/build/workers-api/) and [sleeping and retrying](https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/).
 
+New receipts and Workflow parameters bind `contract.workflowVersion` and `contract.policyVersion` at acceptance. Legacy receipts and in-flight v1 payloads without these fields resolve specifically to the original v1 contract. Unknown versions fail without falling back to current defaults. The v1 policy registry is frozen; retain its semantics and add a new registry/Workflow version for changes. This is explicit compatibility handling, not an automatic migration.
+
 ## Hibernation is eligibility, not a timer
 
 A Durable Object can normally hibernate only while idle and when nothing prevents hibernation: no timers, in-progress awaited fetch, active event, standard WebSocket, or outbound socket. Cloudflare documents a 10-second idle period for normal hibernation eligibility. The documented 70–140 second range concerns eviction of an idle object that cannot hibernate; it is not a periodic wake-up or service-level guarantee. Deployments and restarts can also discard memory.
@@ -54,6 +56,10 @@ Therefore every in-memory runtime, layer, and fiber is a cache or current-handle
 Source: [Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
 
 ## Dispatch and initialization
+
+Before any write or effect, the shell checks the complete candidate data through property descriptors, rejecting accessors and custom array prototypes without invoking getters or serialization hooks. It then validates the complete candidate state on the schema Type side and the entire directive batch (including scheduled payloads and registered instruction targets). Validation does not decode or migrate candidates. Invalid candidates leave storage unchanged and dispatch no effects.
+
+Failures throw `TurnError` with `stage` and `commitStatus`: execution/validation are `not-committed`, storage acknowledgement failures are `unknown`, and directive failures are `committed`. A storage error does not prove the write failed; inspect before retrying. Effect failure stops later effects and does not roll back the commit. The existing guard-scheduling fallback still reports through `onFail`, runs its terminal guard and aborts the batch; it is not a rollback. Provider errors delivered as instruction outcomes remain domain inputs.
 
 For each action, the shell computes and persists the complete next state, orders scheduled guards before emissions and instructions, then executes directives. State persistence and schedule creation are **not one transaction in this implementation**. No broader claim is made about every platform storage API.
 

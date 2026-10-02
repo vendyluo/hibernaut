@@ -22,11 +22,70 @@ const submit = async (room: string, key: string, body: unknown = request) =>
   });
 
 describe("accepted durable tasks", () => {
+  it("continues a legacy Workflow payload without explicit contract fields", async () => {
+    await using all = await introspectWorkflow(env.TaskWorkflow);
+    const stub = await getAgentByName(env.TaskAgent, "task-legacy-contract");
+    await runInDurableObject(stub, (instance: TaskAgent) => {
+      const record: TaskRecord = {
+        key: "one",
+        workflowId: "legacy-contract",
+        watcherId: "",
+        request,
+        status: "queued",
+        createdAt: Date.now(),
+        deadlineAt: Date.now() + 60_000,
+      };
+      void instance.sql`INSERT INTO hibernaut_tasks (key, record) VALUES ('one', ${JSON.stringify(record)})`;
+    });
+    await env.TaskWorkflow.create({
+      id: "legacy-contract",
+      params: { version: 1, owner: "task-legacy-contract", key: "one", request },
+    });
+    const [workflow] = await all.get();
+    await workflow!.waitForStatus("complete");
+    await evictDurableObject(stub);
+    expect(await stub.getTask("one")).toMatchObject({
+      status: "succeeded",
+      output: { text: "result: hello" },
+      contract: { workflowVersion: 1, policyVersion: 1 },
+    });
+  });
+
+  it("rejects an unsupported persisted contract without creating work or rewriting the receipt", async () => {
+    await using all = await introspectWorkflow(env.TaskWorkflow);
+    const stub = await getAgentByName(env.TaskAgent, "task-unknown-contract");
+    const stored = JSON.stringify({
+      key: "one",
+      workflowId: "unknown-contract",
+      watcherId: "",
+      request,
+      status: "submitting",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 60_000,
+      contract: { workflowVersion: 1, policyVersion: 99 },
+    });
+    await runInDurableObject(stub, (instance: TaskAgent) => {
+      void instance.sql`INSERT INTO hibernaut_tasks (key, record) VALUES ('one', ${stored})`;
+    });
+    await evictDurableObject(stub);
+    // Exercise the HTTP boundary, which awaits and handles native RPC failures.
+    expect((await SELF.fetch(url("task-unknown-contract", "one"))).status).toBe(503);
+    expect(await all.get()).toHaveLength(0);
+    expect(
+      await runInDurableObject(
+        stub,
+        (instance: TaskAgent) =>
+          instance.sql<{ record: string }>`SELECT record FROM hibernaut_tasks`[0]!.record,
+      ),
+    ).toBe(stored);
+  });
+
   it("keeps terminal output after eviction and dedupes matching submissions", async () => {
     await using all = await introspectWorkflow(env.TaskWorkflow);
     const response = await submit("task-success", "one");
     expect(response.status).toBe(202);
     const receipt = (await response.json()) as TaskRecord;
+    expect(receipt.contract).toEqual({ workflowVersion: 1, policyVersion: 1 });
     const [workflow] = await all.get();
     await workflow!.waitForStatus("complete");
     const stub = await getAgentByName(env.TaskAgent, "task-success");
@@ -35,6 +94,7 @@ describe("accepted durable tasks", () => {
     expect(await found.json()).toMatchObject({
       status: "succeeded",
       output: { text: "result: hello" },
+      contract: { workflowVersion: 1, policyVersion: 1 },
     });
     const duplicate = await submit("task-success", "one");
     expect(((await duplicate.json()) as TaskRecord).workflowId).toBe(receipt.workflowId);
@@ -137,7 +197,10 @@ describe("accepted durable tasks", () => {
     await evictDurableObject(stub);
     await runDurableObjectAlarm(stub);
     await workflow.waitForStatus("complete");
-    expect(await stub.getTask("one")).toMatchObject({ status: "succeeded" });
+    expect(await stub.getTask("one")).toMatchObject({
+      status: "succeeded",
+      contract: { workflowVersion: 1, policyVersion: 1 },
+    });
   });
 
   it("repairs a lost terminal publication through an alarm without client polling", async () => {
